@@ -13,28 +13,53 @@ export interface Market {
 
 export interface Contract {
   id: string;
-  marketId: string;
   platform: string;
   title: string;
   description: string;
-  outcome: string;
-  currentPrice: number;
-  previousPrice?: number;
-  volume?: number;
-  expiresAt?: Date;
+  yesPrice: number;
+  noPrice: number;
+  volume: number;
+  liquidity: number;
+  endDate: Date;
+  tags: string[];
+  url: string;
   metadata?: Record<string, unknown>;
 }
 
-export interface Position {
-  id: string;
+export interface Order {
   contractId: string;
   platform: string;
-  side: 'buy' | 'sell';
+  side: 'yes' | 'no';
   quantity: number;
-  price: number;
-  timestamp: Date;
+  orderType: 'market' | 'limit';
+  limitPrice?: number;
+}
+
+export interface OrderStatus {
+  orderId: string;
   status: 'pending' | 'filled' | 'cancelled' | 'failed';
-  metadata?: Record<string, unknown>;
+  filledQuantity: number;
+  averagePrice: number;
+  timestamp: Date;
+}
+
+export interface Position {
+  contractId: string;
+  platform: string;
+  quantity: number;
+  side: 'yes' | 'no';
+  averagePrice: number;
+  currentPrice: number;
+  unrealizedPnl: number;
+  realizedPnl: number;
+}
+
+export interface MarketResolution {
+  contractId: string;
+  resolved: boolean;
+  outcome: 'yes' | 'no' | 'invalid';
+  settlementPrice: number;
+  timestamp: Date;
 }
 
 export interface BettingPlatformConfig {
@@ -49,19 +74,13 @@ export interface BettingPlatformConfig {
 export interface BettingPlatform {
   name: string;
   initialize(config: BettingPlatformConfig): Promise<void>;
-  searchMarkets(query: string): Promise<Market[]>;
-  getMarket(marketId: string): Promise<Market>;
-  getContracts(marketId: string): Promise<Contract[]>;
-  getContract(contractId: string): Promise<Contract>;
-  placeOrder(
-    contractId: string,
-    side: 'buy' | 'sell',
-    quantity: number,
-    price?: number,
-  ): Promise<Position>;
-  getPosition(positionId: string): Promise<Position>;
+  getAvailableContracts(): Promise<Contract[]>;
+  getContract(contractId: string): Promise<Contract | null>;
+  placeOrder(order: Order): Promise<OrderStatus>;
+  cancelOrder(orderId: string): Promise<boolean>;
   getPositions(): Promise<Position[]>;
-  cancelOrder(positionId: string): Promise<void>;
+  getBalance(): Promise<number>;
+  getMarketResolution(contractId: string): Promise<MarketResolution | null>;
   isHealthy(): Promise<boolean>;
   destroy(): Promise<void>;
 }

@@ -25,9 +25,6 @@ async function main() {
     console.log('🔍 Validating service configurations...\n');
     await ConfigLoader.validateConfiguration(config);
 
-    // Create orchestrator with alert configuration
-    const orchestrator = new OrchestratorService(config.orchestrator, config.alerts);
-
     // Load and register all services
     console.log('📦 Loading and initializing services...\n');
     const { newsServices, bettingPlatforms, llmProviders } =
@@ -38,10 +35,14 @@ async function main() {
         LLMProviderRegistry,
       );
 
-    // Add services to orchestrator
-    newsServices.forEach((service) => orchestrator.addNewsService(service));
-    bettingPlatforms.forEach((platform) => orchestrator.addBettingPlatform(platform));
-    llmProviders.forEach((provider) => orchestrator.addLLMProvider(provider));
+    // Create orchestrator with all services
+    const orchestrator = new OrchestratorService(
+      config.orchestrator,
+      newsServices,
+      bettingPlatforms,
+      llmProviders,
+      config.alerts,
+    );
 
     console.log('\n✅ All services initialized successfully');
     console.log('\n📊 Orchestrator Configuration:');

@@ -1,5 +1,5 @@
 import { MockBettingPlatform, MockBettingPlatformPlugin } from '../MockBettingPlatform';
-import { BettingPlatformConfig } from '../../../../types';
+import { BettingPlatformConfig, Order } from '../../../../types';
 
 describe('MockBettingPlatform', () => {
   let platform: MockBettingPlatform;
@@ -24,197 +24,229 @@ describe('MockBettingPlatform', () => {
     });
   });
 
-  describe('searchMarkets', () => {
-    it('should search markets by query', async () => {
+  describe('getAvailableContracts', () => {
+    it('should return available contracts', async () => {
       await platform.initialize(config);
-      const markets = await platform.searchMarkets('Fed');
+      const contracts = await platform.getAvailableContracts();
 
-      expect(markets).toBeInstanceOf(Array);
-      expect(markets.length).toBeGreaterThan(0);
+      expect(contracts).toBeInstanceOf(Array);
+      expect(contracts.length).toBeGreaterThan(0);
 
-      markets.forEach((market) => {
-        const hasMatch =
-          market.title.toLowerCase().includes('fed') ||
-          market.description.toLowerCase().includes('fed');
-        expect(hasMatch).toBe(true);
-      });
-    });
-
-    it('should return proper market structure', async () => {
-      await platform.initialize(config);
-      const markets = await platform.searchMarkets('');
-
-      markets.forEach((market) => {
-        expect(market).toMatchObject({
+      contracts.forEach((contract) => {
+        expect(contract).toMatchObject({
           id: expect.any(String),
           platform: expect.any(String),
           title: expect.any(String),
           description: expect.any(String),
+          yesPrice: expect.any(Number),
+          noPrice: expect.any(Number),
+          volume: expect.any(Number),
+          liquidity: expect.any(Number),
+          endDate: expect.any(Date),
+          tags: expect.any(Array),
           url: expect.any(String),
-          createdAt: expect.any(Date),
         });
       });
     });
 
     it('should throw error when not initialized', async () => {
-      await expect(platform.searchMarkets('test')).rejects.toThrow('Platform not initialized');
+      await expect(platform.getAvailableContracts()).rejects.toThrow('Platform not initialized');
     });
   });
 
-  describe('getMarket', () => {
-    it('should get a specific market', async () => {
+  describe('getContract', () => {
+    it('should get a specific contract', async () => {
       await platform.initialize(config);
-      const markets = await platform.searchMarkets('');
-      const marketId = markets[0].id;
+      const contracts = await platform.getAvailableContracts();
+      const contractId = contracts[0].id;
 
-      const market = await platform.getMarket(marketId);
-      expect(market.id).toBe(marketId);
+      const contract = await platform.getContract(contractId);
+      expect(contract).not.toBeNull();
+      expect(contract?.id).toBe(contractId);
     });
 
-    it('should throw error for non-existent market', async () => {
+    it('should return null for non-existent contract', async () => {
       await platform.initialize(config);
-      await expect(platform.getMarket('non-existent-id')).rejects.toThrow('not found');
-    });
-  });
-
-  describe('getContracts', () => {
-    it('should get contracts for a market', async () => {
-      await platform.initialize(config);
-      const markets = await platform.searchMarkets('');
-      const marketId = markets[0].id;
-
-      const contracts = await platform.getContracts(marketId);
-
-      expect(contracts).toBeInstanceOf(Array);
-      expect(contracts.length).toBe(2); // YES and NO contracts
-
-      const yesContract = contracts.find((c) => c.outcome === 'YES');
-      const noContract = contracts.find((c) => c.outcome === 'NO');
-
-      expect(yesContract).toBeDefined();
-      expect(noContract).toBeDefined();
-    });
-
-    it('should return proper contract structure', async () => {
-      await platform.initialize(config);
-      const contracts = await platform.getContracts('test-market');
-
-      contracts.forEach((contract) => {
-        expect(contract).toMatchObject({
-          id: expect.any(String),
-          marketId: expect.any(String),
-          platform: expect.any(String),
-          title: expect.any(String),
-          description: expect.any(String),
-          outcome: expect.any(String),
-          currentPrice: expect.any(Number),
-        });
-      });
+      const contract = await platform.getContract('non-existent-id');
+      expect(contract).toBeNull();
     });
   });
 
   describe('placeOrder', () => {
-    it('should place a buy order', async () => {
+    it('should place a market order for YES', async () => {
       await platform.initialize(config);
-      const contracts = await platform.getContracts('test-market');
+      const contracts = await platform.getAvailableContracts();
       const contract = contracts[0];
 
-      const position = await platform.placeOrder(contract.id, 'buy', 10, 0.5);
-
-      expect(position).toMatchObject({
-        id: expect.any(String),
+      const order: Order = {
         contractId: contract.id,
         platform: platform.name,
-        side: 'buy',
+        side: 'yes',
         quantity: 10,
-        price: 0.5,
+        orderType: 'market',
+      };
+
+      const orderStatus = await platform.placeOrder(order);
+
+      expect(orderStatus).toMatchObject({
+        orderId: expect.any(String),
         status: 'filled',
+        filledQuantity: 10,
+        averagePrice: contract.yesPrice,
+        timestamp: expect.any(Date),
+      });
+    });
+
+    it('should place a limit order for NO', async () => {
+      await platform.initialize(config);
+      const contracts = await platform.getAvailableContracts();
+      const contract = contracts[0];
+
+      const order: Order = {
+        contractId: contract.id,
+        platform: platform.name,
+        side: 'no',
+        quantity: 5,
+        orderType: 'limit',
+        limitPrice: 0.4,
+      };
+
+      const orderStatus = await platform.placeOrder(order);
+
+      expect(orderStatus).toMatchObject({
+        orderId: expect.any(String),
+        status: 'filled',
+        filledQuantity: 5,
+        averagePrice: 0.4,
+        timestamp: expect.any(Date),
       });
     });
 
     it('should use current price if not specified', async () => {
       await platform.initialize(config);
-      const contracts = await platform.getContracts('test-market');
+      const contracts = await platform.getAvailableContracts();
       const contract = contracts[0];
 
-      const position = await platform.placeOrder(contract.id, 'buy', 10);
+      const order: Order = {
+        contractId: contract.id,
+        platform: platform.name,
+        side: 'yes',
+        quantity: 10,
+        orderType: 'market',
+      };
 
-      expect(position.price).toBe(contract.currentPrice);
-    });
-  });
-
-  describe('getPosition', () => {
-    it('should retrieve a position', async () => {
-      await platform.initialize(config);
-      const contracts = await platform.getContracts('test-market');
-      const position = await platform.placeOrder(contracts[0].id, 'buy', 10, 0.5);
-
-      const retrieved = await platform.getPosition(position.id);
-      expect(retrieved).toEqual(position);
-    });
-
-    it('should throw error for non-existent position', async () => {
-      await platform.initialize(config);
-      await expect(platform.getPosition('non-existent')).rejects.toThrow('not found');
-    });
-  });
-
-  describe('getPositions', () => {
-    it('should retrieve all positions', async () => {
-      await platform.initialize(config);
-      const contracts = await platform.getContracts('test-market');
-
-      const position1 = await platform.placeOrder(contracts[0].id, 'buy', 10, 0.5);
-      const position2 = await platform.placeOrder(contracts[1].id, 'sell', 5, 0.3);
-
-      const positions = await platform.getPositions();
-
-      expect(positions).toHaveLength(2);
-      expect(positions).toContainEqual(position1);
-      expect(positions).toContainEqual(position2);
+      const orderStatus = await platform.placeOrder(order);
+      expect(orderStatus.averagePrice).toBe(contract.yesPrice);
     });
   });
 
   describe('cancelOrder', () => {
     it('should cancel an order', async () => {
       await platform.initialize(config);
-      const contracts = await platform.getContracts('test-market');
-      const position = await platform.placeOrder(contracts[0].id, 'buy', 10, 0.5);
+      const contracts = await platform.getAvailableContracts();
+      const contract = contracts[0];
 
-      await platform.cancelOrder(position.id);
+      const order: Order = {
+        contractId: contract.id,
+        platform: platform.name,
+        side: 'yes',
+        quantity: 10,
+        orderType: 'market',
+      };
 
-      const updated = await platform.getPosition(position.id);
-      expect(updated.status).toBe('cancelled');
+      const orderStatus = await platform.placeOrder(order);
+      const cancelled = await platform.cancelOrder(orderStatus.orderId);
+
+      expect(cancelled).toBe(true);
     });
 
-    it('should throw error for non-existent position', async () => {
+    it('should return false for non-existent order', async () => {
       await platform.initialize(config);
-      await expect(platform.cancelOrder('non-existent')).rejects.toThrow('not found');
+      const cancelled = await platform.cancelOrder('non-existent');
+      expect(cancelled).toBe(false);
+    });
+  });
+
+  describe('getPositions', () => {
+    it('should retrieve positions after placing orders', async () => {
+      await platform.initialize(config);
+      const contracts = await platform.getAvailableContracts();
+      const contract = contracts[0];
+
+      const order1: Order = {
+        contractId: contract.id,
+        platform: platform.name,
+        side: 'yes',
+        quantity: 10,
+        orderType: 'market',
+      };
+
+      const order2: Order = {
+        contractId: contracts[1].id,
+        platform: platform.name,
+        side: 'no',
+        quantity: 5,
+        orderType: 'market',
+      };
+
+      await platform.placeOrder(order1);
+      await platform.placeOrder(order2);
+
+      const positions = await platform.getPositions();
+
+      expect(positions).toHaveLength(2);
+      expect(positions[0]).toMatchObject({
+        contractId: expect.any(String),
+        platform: platform.name,
+        quantity: expect.any(Number),
+        side: expect.stringMatching(/^(yes|no)$/),
+        averagePrice: expect.any(Number),
+        currentPrice: expect.any(Number),
+      });
+    });
+  });
+
+  describe('getBalance', () => {
+    it('should return account balance', async () => {
+      await platform.initialize(config);
+      const balance = await platform.getBalance();
+      expect(balance).toBe(10000);
+    });
+  });
+
+  describe('getMarketResolution', () => {
+    it('should return null for unresolved markets', async () => {
+      await platform.initialize(config);
+      const contracts = await platform.getAvailableContracts();
+      const resolution = await platform.getMarketResolution(contracts[0].id);
+      expect(resolution).toBeNull();
     });
   });
 
   describe('destroy', () => {
     it('should destroy the platform', async () => {
       await platform.initialize(config);
-      const contracts = await platform.getContracts('test-market');
-      await platform.placeOrder(contracts[0].id, 'buy', 10, 0.5);
+      const contracts = await platform.getAvailableContracts();
+
+      const order: Order = {
+        contractId: contracts[0].id,
+        platform: platform.name,
+        side: 'yes',
+        quantity: 10,
+        orderType: 'market',
+      };
+
+      await platform.placeOrder(order);
 
       await platform.destroy();
-
       await expect(platform.isHealthy()).resolves.toBe(false);
     });
   });
-});
 
-describe('MockBettingPlatformPlugin', () => {
-  it('should create a MockBettingPlatform instance', () => {
-    const config: BettingPlatformConfig = {
-      name: 'mock-betting',
-    };
-
-    const platform = MockBettingPlatformPlugin.create(config);
-
-    expect(platform).toBeInstanceOf(MockBettingPlatform);
-    expect(platform.name).toBe('mock-betting');
+  describe('MockBettingPlatformPlugin', () => {
+    it('should create a new instance', () => {
+      const instance = MockBettingPlatformPlugin.create(config);
+      expect(instance).toBeInstanceOf(MockBettingPlatform);
+    });
   });
 });

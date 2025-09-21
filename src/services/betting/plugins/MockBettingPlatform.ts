@@ -2,15 +2,19 @@ import {
   BettingPlatform,
   BettingPlatformConfig,
   BettingPlatformPlugin,
-  Market,
   Contract,
   Position,
+  Order,
+  OrderStatus,
+  MarketResolution,
 } from '../../../types';
 
 export class MockBettingPlatform implements BettingPlatform {
   name: string;
   private isInitialized = false;
   private positions: Map<string, Position> = new Map();
+  private orders: Map<string, OrderStatus> = new Map();
+  private contracts: Map<string, Contract> = new Map();
 
   constructor(config: BettingPlatformConfig) {
     this.name = config.name;
@@ -18,151 +22,125 @@ export class MockBettingPlatform implements BettingPlatform {
 
   async initialize(config: BettingPlatformConfig): Promise<void> {
     this.isInitialized = true;
-    console.log(`MockBettingPlatform initialized: ${config.name}`);
-  }
 
-  async searchMarkets(query: string): Promise<Market[]> {
-    if (!this.isInitialized) {
-      throw new Error('Platform not initialized');
-    }
-
-    const mockMarkets: Market[] = [
+    // Create some mock contracts
+    const mockContracts: Contract[] = [
       {
-        id: `market-fed-${Date.now()}`,
+        id: `contract-fed-${Date.now()}`,
         platform: this.name,
         title: 'Will the Fed cut rates in Q1 2025?',
         description:
           'This market resolves YES if the Federal Reserve cuts interest rates by any amount in Q1 2025',
-        url: 'https://mock.platform/markets/fed-rates-q1',
-        createdAt: new Date(Date.now() - 86400000),
-        expiresAt: new Date('2025-03-31'),
+        yesPrice: 0.65,
+        noPrice: 0.35,
         volume: 250000,
         liquidity: 50000,
-        metadata: { category: 'economics' },
+        endDate: new Date('2025-03-31'),
+        tags: ['economics', 'federal-reserve'],
+        url: 'https://mock.platform/markets/fed-rates-q1',
+        metadata: {
+          category: 'economics',
+          previousPrice: 0.62,
+        },
       },
       {
-        id: `market-tesla-${Date.now()}`,
+        id: `contract-tesla-${Date.now()}`,
         platform: this.name,
         title: 'Tesla stock above $400 by end of 2025?',
         description: 'Resolves YES if TSLA closes above $400 on December 31, 2025',
-        url: 'https://mock.platform/markets/tesla-400',
-        createdAt: new Date(Date.now() - 172800000),
-        expiresAt: new Date('2025-12-31'),
+        yesPrice: 0.45,
+        noPrice: 0.55,
         volume: 180000,
         liquidity: 35000,
-        metadata: { category: 'stocks' },
+        endDate: new Date('2025-12-31'),
+        tags: ['stocks', 'tesla'],
+        url: 'https://mock.platform/markets/tesla-400',
+        metadata: {
+          category: 'stocks',
+          previousPrice: 0.48,
+        },
       },
     ];
 
-    return mockMarkets.filter(
-      (m) =>
-        m.title.toLowerCase().includes(query.toLowerCase()) ||
-        m.description.toLowerCase().includes(query.toLowerCase()),
-    );
+    mockContracts.forEach((contract) => {
+      this.contracts.set(contract.id, contract);
+    });
+
+    console.log(`MockBettingPlatform initialized: ${config.name}`);
   }
 
-  async getMarket(marketId: string): Promise<Market> {
+  async getAvailableContracts(): Promise<Contract[]> {
+    if (!this.isInitialized) {
+      throw new Error('Platform not initialized');
+    }
+    return Array.from(this.contracts.values());
+  }
+
+  async getContract(contractId: string): Promise<Contract | null> {
+    if (!this.isInitialized) {
+      throw new Error('Platform not initialized');
+    }
+    return this.contracts.get(contractId) || null;
+  }
+
+  async placeOrder(order: Order): Promise<OrderStatus> {
     if (!this.isInitialized) {
       throw new Error('Platform not initialized');
     }
 
-    const markets = await this.searchMarkets('');
-    const market = markets.find((m) => m.id === marketId);
-    if (!market) {
-      throw new Error(`Market ${marketId} not found`);
-    }
-    return market;
-  }
-
-  async getContracts(marketId: string): Promise<Contract[]> {
-    if (!this.isInitialized) {
-      throw new Error('Platform not initialized');
-    }
-
-    return [
-      {
-        id: `${marketId}-yes`,
-        marketId,
-        platform: this.name,
-        title: 'YES',
-        description: 'This contract pays $1 if the outcome is YES',
-        outcome: 'YES',
-        currentPrice: 0.65,
-        previousPrice: 0.62,
-        volume: 125000,
-        expiresAt: new Date('2025-03-31'),
-        metadata: { lastUpdate: new Date() },
-      },
-      {
-        id: `${marketId}-no`,
-        marketId,
-        platform: this.name,
-        title: 'NO',
-        description: 'This contract pays $1 if the outcome is NO',
-        outcome: 'NO',
-        currentPrice: 0.35,
-        previousPrice: 0.38,
-        volume: 125000,
-        expiresAt: new Date('2025-03-31'),
-        metadata: { lastUpdate: new Date() },
-      },
-    ];
-  }
-
-  async getContract(contractId: string): Promise<Contract> {
-    if (!this.isInitialized) {
-      throw new Error('Platform not initialized');
-    }
-
-    const marketId = contractId.split('-').slice(0, -1).join('-');
-    const contracts = await this.getContracts(marketId);
-    const contract = contracts.find((c) => c.id === contractId);
+    const contract = await this.getContract(order.contractId);
     if (!contract) {
-      throw new Error(`Contract ${contractId} not found`);
-    }
-    return contract;
-  }
-
-  async placeOrder(
-    contractId: string,
-    side: 'buy' | 'sell',
-    quantity: number,
-    price?: number,
-  ): Promise<Position> {
-    if (!this.isInitialized) {
-      throw new Error('Platform not initialized');
+      throw new Error(`Contract ${order.contractId} not found`);
     }
 
-    const contract = await this.getContract(contractId);
-    const position: Position = {
-      id: `pos-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      contractId,
-      platform: this.name,
-      side,
-      quantity,
-      price: price || contract.currentPrice,
-      timestamp: new Date(),
+    const orderId = `order-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const price = order.limitPrice || (order.side === 'yes' ? contract.yesPrice : contract.noPrice);
+
+    const orderStatus: OrderStatus = {
+      orderId,
       status: 'filled',
-      metadata: { mock: true },
+      filledQuantity: order.quantity,
+      averagePrice: price,
+      timestamp: new Date(),
     };
 
-    this.positions.set(position.id, position);
+    this.orders.set(orderId, orderStatus);
+
+    // Create a position for this order
+    const position: Position = {
+      contractId: order.contractId,
+      platform: this.name,
+      quantity: order.quantity,
+      side: order.side,
+      averagePrice: price,
+      currentPrice: order.side === 'yes' ? contract.yesPrice : contract.noPrice,
+      unrealizedPnl: 0,
+      realizedPnl: 0,
+    };
+
+    const positionKey = `${order.contractId}-${order.side}`;
+    this.positions.set(positionKey, position);
+
     console.log(
-      `Mock order placed: ${side} ${quantity} contracts of ${contractId} at ${position.price}`,
+      `Mock order placed: ${order.quantity} ${order.side} contracts of ${order.contractId} at ${price}`,
     );
-    return position;
+
+    return orderStatus;
   }
 
-  async getPosition(positionId: string): Promise<Position> {
+  async cancelOrder(orderId: string): Promise<boolean> {
     if (!this.isInitialized) {
       throw new Error('Platform not initialized');
     }
 
-    const position = this.positions.get(positionId);
-    if (!position) {
-      throw new Error(`Position ${positionId} not found`);
+    const order = this.orders.get(orderId);
+    if (!order) {
+      return false;
     }
-    return position;
+
+    order.status = 'cancelled';
+    console.log(`Mock order cancelled: ${orderId}`);
+    return true;
   }
 
   async getPositions(): Promise<Position[]> {
@@ -172,18 +150,21 @@ export class MockBettingPlatform implements BettingPlatform {
     return Array.from(this.positions.values());
   }
 
-  async cancelOrder(positionId: string): Promise<void> {
+  async getBalance(): Promise<number> {
+    if (!this.isInitialized) {
+      throw new Error('Platform not initialized');
+    }
+    // Return a mock balance
+    return 10000; // $10,000
+  }
+
+  async getMarketResolution(_contractId: string): Promise<MarketResolution | null> {
     if (!this.isInitialized) {
       throw new Error('Platform not initialized');
     }
 
-    const position = this.positions.get(positionId);
-    if (!position) {
-      throw new Error(`Position ${positionId} not found`);
-    }
-
-    position.status = 'cancelled';
-    console.log(`Mock order cancelled: ${positionId}`);
+    // Return null for mock platform (no resolved markets)
+    return null;
   }
 
   async isHealthy(): Promise<boolean> {
@@ -192,13 +173,15 @@ export class MockBettingPlatform implements BettingPlatform {
 
   async destroy(): Promise<void> {
     this.positions.clear();
+    this.orders.clear();
+    this.contracts.clear();
     this.isInitialized = false;
     console.log('MockBettingPlatform destroyed');
   }
 }
 
 export const MockBettingPlatformPlugin: BettingPlatformPlugin = {
-  create(config: BettingPlatformConfig): BettingPlatform {
+  create: (config: BettingPlatformConfig) => {
     return new MockBettingPlatform(config);
   },
 };

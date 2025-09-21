@@ -25,15 +25,19 @@ describe('ContractValidatorService', () => {
 
     testContract = {
       id: 'contract-1',
-      marketId: 'market-1',
       platform: 'test-platform',
       title: 'Fed Cuts Rates in Q1',
       description: 'Will the Federal Reserve cut interest rates in Q1?',
-      outcome: 'YES',
-      currentPrice: 0.65,
-      previousPrice: 0.6,
+      yesPrice: 0.65,
+      noPrice: 0.35,
       volume: 100000,
-      expiresAt: new Date('2024-03-31'),
+      liquidity: 50000,
+      endDate: new Date('2024-03-31'),
+      tags: ['economics', 'fed'],
+      url: 'https://example.com/market',
+      metadata: {
+        previousPrice: 0.6,
+      },
     };
 
     testNewsInsight = {

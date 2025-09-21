@@ -20,9 +20,9 @@ Analyze the connection between news insights and contract terms. Be precise abou
 CONTRACT:
 Title: ${contract.title}
 Description: ${contract.description}
-Outcome: ${contract.outcome}
-Current Price: ${contract.currentPrice}
-Expires: ${contract.expiresAt}
+Yes Price: ${contract.yesPrice}
+No Price: ${contract.noPrice}
+Expires: ${contract.endDate}
 
 NEWS INSIGHT:
 Summary: ${newsInsight.summary}
@@ -186,10 +186,11 @@ Determine:
     newsInsight: ParsedNewsInsight,
     analysis: string,
   ): 'buy' | 'sell' | 'hold' {
-    if (newsInsight.sentiment.overall > 0.3 && contract.outcome === 'YES') {
+    // Check if sentiment aligns with underpriced outcomes
+    if (newsInsight.sentiment.overall > 0.3 && contract.yesPrice < 0.6) {
       return 'buy';
     }
-    if (newsInsight.sentiment.overall < -0.3 && contract.outcome === 'NO') {
+    if (newsInsight.sentiment.overall < -0.3 && contract.noPrice < 0.6) {
       return 'buy';
     }
 
@@ -222,8 +223,8 @@ Determine:
     const risks: string[] = [];
 
     if (
-      contract.expiresAt &&
-      new Date(contract.expiresAt) < new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+      contract.endDate &&
+      new Date(contract.endDate) < new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
     ) {
       risks.push('Contract expires soon - limited time for resolution');
     }
@@ -250,11 +251,11 @@ Determine:
   ): string[] {
     const opportunities: string[] = [];
 
-    if (contract.currentPrice < 0.3 && newsInsight.sentiment.overall > 0.5) {
+    if (contract.yesPrice < 0.3 && newsInsight.sentiment.overall > 0.5) {
       opportunities.push('Contract underpriced relative to positive sentiment');
     }
 
-    if (contract.currentPrice > 0.7 && newsInsight.sentiment.overall < -0.3) {
+    if (contract.yesPrice > 0.7 && newsInsight.sentiment.overall < -0.3) {
       opportunities.push('Contract overpriced relative to negative sentiment');
     }
 
@@ -262,7 +263,9 @@ Determine:
       opportunities.push('High urgency news event - potential for quick movement');
     }
 
-    if (contract.previousPrice && Math.abs(contract.currentPrice - contract.previousPrice) > 0.1) {
+    // Check for price volatility if we have previous price data in metadata
+    const previousPrice = contract.metadata?.previousPrice as number | undefined;
+    if (previousPrice && Math.abs(contract.yesPrice - previousPrice) > 0.1) {
       opportunities.push('Recent price volatility - opportunity for momentum trading');
     }
 

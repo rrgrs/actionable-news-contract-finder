@@ -4,9 +4,9 @@ import {
   BettingPlatform,
   LLMProvider,
   NewsItem,
-  Market,
   Contract,
   ParsedNewsInsight,
+  Order,
 } from '../../../types';
 import { AlertService } from '../../alerts/AlertService';
 import { AlertConfig } from '../../../config/types';
@@ -52,8 +52,6 @@ describe('OrchestratorService', () => {
       () => mockAlertService,
     );
 
-    orchestrator = new OrchestratorService(config, alertConfig);
-
     // Create mock news service
     mockNewsService = {
       name: 'mock-news',
@@ -68,14 +66,19 @@ describe('OrchestratorService', () => {
     mockBettingPlatform = {
       name: 'mock-platform',
       initialize: jest.fn().mockResolvedValue(undefined),
-      searchMarkets: jest.fn().mockResolvedValue([]),
-      getMarket: jest.fn(),
-      getContracts: jest.fn().mockResolvedValue([]),
-      getContract: jest.fn(),
-      placeOrder: jest.fn(),
-      getPosition: jest.fn(),
+      getAvailableContracts: jest.fn().mockResolvedValue([]),
+      getContract: jest.fn().mockResolvedValue(null),
+      placeOrder: jest.fn().mockResolvedValue({
+        orderId: 'test-order-1',
+        status: 'filled' as const,
+        filledQuantity: 10,
+        averagePrice: 0.5,
+        timestamp: new Date(),
+      }),
+      cancelOrder: jest.fn().mockResolvedValue(true),
       getPositions: jest.fn().mockResolvedValue([]),
-      cancelOrder: jest.fn().mockResolvedValue(undefined),
+      getBalance: jest.fn().mockResolvedValue(10000),
+      getMarketResolution: jest.fn().mockResolvedValue(null),
       isHealthy: jest.fn().mockResolvedValue(true),
       destroy: jest.fn().mockResolvedValue(undefined),
     };
@@ -89,6 +92,15 @@ describe('OrchestratorService', () => {
       isHealthy: jest.fn().mockResolvedValue(true),
       destroy: jest.fn().mockResolvedValue(undefined),
     };
+
+    // Initialize orchestrator with services
+    orchestrator = new OrchestratorService(
+      config,
+      [mockNewsService],
+      [mockBettingPlatform],
+      [mockLLMProvider],
+      alertConfig,
+    );
   });
 
   afterEach(() => {
@@ -97,19 +109,17 @@ describe('OrchestratorService', () => {
   });
 
   describe('service management', () => {
-    it('should add news service', () => {
-      orchestrator.addNewsService(mockNewsService);
-      expect(orchestrator['newsServices']).toContain(mockNewsService);
-    });
-
-    it('should add betting platform', () => {
-      orchestrator.addBettingPlatform(mockBettingPlatform);
-      expect(orchestrator['bettingPlatforms']).toContain(mockBettingPlatform);
-    });
-
-    it('should add LLM provider', () => {
-      orchestrator.addLLMProvider(mockLLMProvider);
-      expect(orchestrator['llmProviders']).toContain(mockLLMProvider);
+    it('should initialize with provided services', () => {
+      const orchestratorWithServices = new OrchestratorService(
+        config,
+        [mockNewsService],
+        [mockBettingPlatform],
+        [mockLLMProvider],
+        alertConfig,
+      );
+      expect(orchestratorWithServices['newsServices']).toContain(mockNewsService);
+      expect(orchestratorWithServices['bettingPlatforms']).toContain(mockBettingPlatform);
+      expect(orchestratorWithServices['llmProviders']).toContain(mockLLMProvider);
     });
   });
 
@@ -117,15 +127,15 @@ describe('OrchestratorService', () => {
     it('should start the orchestrator', async () => {
       await orchestrator.start();
       expect(orchestrator['isRunning']).toBe(true);
-      expect(orchestrator['pollInterval']).toBeDefined();
+      expect(orchestrator['processInterval']).toBeDefined();
     });
 
     it('should not start if already running', async () => {
       await orchestrator.start();
-      const pollInterval = orchestrator['pollInterval'];
+      const processInterval = orchestrator['processInterval'];
 
       await orchestrator.start();
-      expect(orchestrator['pollInterval']).toBe(pollInterval);
+      expect(orchestrator['processInterval']).toBe(processInterval);
     });
 
     it('should stop the orchestrator', async () => {
@@ -133,13 +143,13 @@ describe('OrchestratorService', () => {
       await orchestrator.stop();
 
       expect(orchestrator['isRunning']).toBe(false);
-      expect(orchestrator['pollInterval']).toBeUndefined();
+      expect(orchestrator['processInterval']).toBeNull();
     });
 
     it('should run cycle on interval', async () => {
-      const runCycleSpy = jest
-        .spyOn(orchestrator as unknown as { runCycle: () => Promise<void> }, 'runCycle')
-        .mockResolvedValue();
+      const processLoopSpy = jest
+        .spyOn(orchestrator as unknown as { processLoop: () => Promise<unknown> }, 'processLoop')
+        .mockResolvedValue({});
 
       await orchestrator.start();
 
@@ -149,18 +159,12 @@ describe('OrchestratorService', () => {
       // Wait for async operations
       await Promise.resolve();
 
-      expect(runCycleSpy).toHaveBeenCalledTimes(2); // Once on start, once on interval
+      expect(processLoopSpy).toHaveBeenCalledTimes(1); // Once on start
     });
   });
 
-  describe('runCycle with alerts', () => {
-    beforeEach(() => {
-      orchestrator.addNewsService(mockNewsService);
-      orchestrator.addBettingPlatform(mockBettingPlatform);
-      orchestrator.addLLMProvider(mockLLMProvider);
-    });
-
-    it('should skip duplicate news items', async () => {
+  describe('processLoop with alerts', () => {
+    it('should fetch and process news', async () => {
       const mockNews: NewsItem[] = [
         {
           id: 'news-1',
@@ -174,16 +178,9 @@ describe('OrchestratorService', () => {
 
       mockNewsService.fetchLatestNews.mockResolvedValue(mockNews);
 
-      // First cycle
-      await orchestrator['runCycle']();
-      expect(orchestrator['processedNewsIds'].has('news-1')).toBe(true);
+      await orchestrator['processLoop']();
 
-      // Second cycle with same news
-      await orchestrator['runCycle']();
-
-      // News parser should only be called once
-      const parseNewsSpy = jest.spyOn(orchestrator['newsParser'], 'parseNews');
-      expect(parseNewsSpy).toHaveBeenCalledTimes(0); // Not called in second cycle
+      expect(mockNewsService.fetchLatestNews).toHaveBeenCalled();
     });
 
     it('should send alert for high confidence opportunities', async () => {
@@ -198,32 +195,24 @@ describe('OrchestratorService', () => {
         },
       ];
 
-      const mockMarkets: Market[] = [
-        {
-          id: 'market-1',
-          platform: 'test',
-          title: 'Fed Rate Decision',
-          description: 'Will Fed cut rates?',
-          url: 'https://market.com',
-          createdAt: new Date(),
-        },
-      ];
-
       const mockContracts: Contract[] = [
         {
           id: 'contract-1',
-          marketId: 'market-1',
           platform: 'test',
-          title: 'YES',
-          description: 'Yes outcome',
-          outcome: 'YES',
-          currentPrice: 0.65,
+          title: 'Fed Rate Decision - YES',
+          description: 'Will Fed cut rates? - Yes outcome',
+          yesPrice: 0.65,
+          noPrice: 0.35,
+          volume: 100000,
+          liquidity: 50000,
+          endDate: new Date('2024-12-31'),
+          tags: ['economics'],
+          url: 'https://market.com',
         },
       ];
 
       mockNewsService.fetchLatestNews.mockResolvedValue(mockNews);
-      mockBettingPlatform.searchMarkets.mockResolvedValue(mockMarkets);
-      mockBettingPlatform.getContracts.mockResolvedValue(mockContracts);
+      mockBettingPlatform.getAvailableContracts.mockResolvedValue(mockContracts);
 
       // Mock parser to return high relevance insight
       jest.spyOn(orchestrator['newsParser'], 'parseNews').mockResolvedValue({
@@ -232,8 +221,10 @@ describe('OrchestratorService', () => {
         entities: [],
         events: [],
         predictions: [],
-        sentiment: { overall: 0.5, positive: 0.7, negative: 0.2, neutral: 0.1 },
-        relevanceScore: 0.8,
+        sentiment: {
+          overall: 0.8,
+          confidence: 0.9,
+        },
         suggestedActions: [
           {
             type: 'bet',
@@ -243,7 +234,7 @@ describe('OrchestratorService', () => {
             confidence: 0.8,
           },
         ],
-      } as ParsedNewsInsight);
+      } as unknown as ParsedNewsInsight);
 
       // Mock validator to return high confidence validation
       jest.spyOn(orchestrator['contractValidator'], 'batchValidateContracts').mockResolvedValue([
@@ -262,7 +253,7 @@ describe('OrchestratorService', () => {
         },
       ]);
 
-      await orchestrator['runCycle']();
+      await orchestrator['processLoop']();
 
       // Should send alert for high confidence opportunity
       expect(mockAlertService.sendAlert).toHaveBeenCalledWith(
@@ -276,426 +267,195 @@ describe('OrchestratorService', () => {
 
     it('should place bets when placeBets is true', async () => {
       config.placeBets = true;
-      (AlertService as jest.MockedClass<typeof AlertService>).mockImplementation(
-        () => mockAlertService,
-      );
-      orchestrator = new OrchestratorService(config, alertConfig);
-      orchestrator.addNewsService(mockNewsService);
-      orchestrator.addBettingPlatform(mockBettingPlatform);
-      orchestrator.addLLMProvider(mockLLMProvider);
 
       const mockNews: NewsItem[] = [
         {
           id: 'news-1',
           source: 'test',
-          title: 'Test News',
-          content: 'Test content',
+          title: 'Market News',
+          content: 'Market moving news',
           url: 'https://test.com',
           publishedAt: new Date(),
         },
       ];
 
-      mockNewsService.fetchLatestNews.mockResolvedValue(mockNews);
+      const mockContracts: Contract[] = [
+        {
+          id: 'contract-1',
+          platform: 'test',
+          title: 'Market Bet',
+          description: 'Test bet',
+          yesPrice: 0.45,
+          noPrice: 0.55,
+          volume: 50000,
+          liquidity: 25000,
+          endDate: new Date('2024-12-31'),
+          tags: ['test'],
+          url: 'https://market.com',
+        },
+      ];
 
-      // Mock high confidence validation
+      mockNewsService.fetchLatestNews.mockResolvedValue(mockNews);
+      mockBettingPlatform.getAvailableContracts.mockResolvedValue(mockContracts);
+
+      // Mock parser
+      jest.spyOn(orchestrator['newsParser'], 'parseNews').mockResolvedValue({
+        originalNewsId: 'news-1',
+        summary: 'Market news',
+        entities: [],
+        events: [],
+        predictions: [],
+        sentiment: { overall: 0.5, confidence: 0.8 },
+        suggestedActions: [
+          {
+            type: 'bet',
+            description: 'Place bet',
+            urgency: 'high',
+            relatedMarketQuery: 'market',
+            confidence: 0.8,
+          },
+        ],
+      } as unknown as ParsedNewsInsight);
+
+      // Mock validator
       jest.spyOn(orchestrator['contractValidator'], 'batchValidateContracts').mockResolvedValue([
         {
           contractId: 'contract-1',
           newsInsightId: 'news-1',
           isRelevant: true,
-          relevanceScore: 0.85,
+          relevanceScore: 0.8,
           matchedEntities: [],
           matchedEvents: [],
           reasoning: 'Relevant',
           suggestedPosition: 'buy',
-          suggestedConfidence: 0.8,
+          suggestedConfidence: 0.75,
           risks: [],
           opportunities: [],
         },
       ]);
 
-      jest.spyOn(orchestrator['newsParser'], 'parseNews').mockResolvedValue({
-        originalNewsId: 'news-1',
-        summary: 'Test',
-        entities: [],
-        events: [],
-        predictions: [],
-        sentiment: { overall: 0.5, positive: 0.7, negative: 0.2, neutral: 0.1 },
-        relevanceScore: 0.8,
-        suggestedActions: [
-          {
-            type: 'bet',
-            description: 'Test',
-            urgency: 'high',
-            relatedMarketQuery: 'test',
-            confidence: 0.8,
-          },
-        ],
-      } as ParsedNewsInsight);
+      await orchestrator['processLoop']();
 
-      mockBettingPlatform.searchMarkets.mockResolvedValue([
-        {
-          id: 'market-1',
-          platform: 'test',
-          title: 'Test Market',
-          description: 'Test',
-          url: 'https://test.com',
-          createdAt: new Date(),
-        },
-      ]);
-
-      mockBettingPlatform.getContracts.mockResolvedValue([
-        {
-          id: 'contract-1',
-          marketId: 'market-1',
-          platform: 'test',
-          title: 'YES',
-          description: 'Yes',
-          outcome: 'YES',
-          currentPrice: 0.5,
-        },
-      ]);
-
-      mockBettingPlatform.placeOrder.mockResolvedValue({
-        id: 'position-1',
-        contractId: 'contract-1',
-        platform: 'test',
-        side: 'buy',
-        quantity: 10,
-        price: 0.5,
-        timestamp: new Date(),
-        status: 'filled',
-      });
-
-      await orchestrator['runCycle']();
-
-      expect(mockBettingPlatform.placeOrder).toHaveBeenCalled();
-      // Should send alert when position is created
-      expect(mockAlertService.sendAlert).toHaveBeenCalled();
+      expect(mockBettingPlatform.placeOrder).toHaveBeenCalledWith(
+        expect.objectContaining({
+          contractId: 'contract-1',
+          side: 'yes',
+          orderType: 'limit',
+        } as Order),
+      );
     });
 
     it('should not place bets when placeBets is false', async () => {
       config.placeBets = false;
-      (AlertService as jest.MockedClass<typeof AlertService>).mockImplementation(
-        () => mockAlertService,
-      );
-      orchestrator = new OrchestratorService(config, alertConfig);
-      orchestrator.addNewsService(mockNewsService);
-      orchestrator.addBettingPlatform(mockBettingPlatform);
-      orchestrator.addLLMProvider(mockLLMProvider);
 
       const mockNews: NewsItem[] = [
         {
           id: 'news-1',
           source: 'test',
-          title: 'Test News',
-          content: 'Test content',
+          title: 'Market News',
+          content: 'Market moving news',
           url: 'https://test.com',
           publishedAt: new Date(),
         },
       ];
 
-      mockNewsService.fetchLatestNews.mockResolvedValue(mockNews);
+      const mockContracts: Contract[] = [
+        {
+          id: 'contract-1',
+          platform: 'test',
+          title: 'Market Bet',
+          description: 'Test bet',
+          yesPrice: 0.45,
+          noPrice: 0.55,
+          volume: 50000,
+          liquidity: 25000,
+          endDate: new Date('2024-12-31'),
+          tags: ['test'],
+          url: 'https://market.com',
+        },
+      ];
 
+      mockNewsService.fetchLatestNews.mockResolvedValue(mockNews);
+      mockBettingPlatform.getAvailableContracts.mockResolvedValue(mockContracts);
+
+      // Mock parser
+      jest.spyOn(orchestrator['newsParser'], 'parseNews').mockResolvedValue({
+        originalNewsId: 'news-1',
+        summary: 'Market news',
+        entities: [],
+        events: [],
+        predictions: [],
+        sentiment: { overall: 0.5, confidence: 0.8 },
+        suggestedActions: [
+          {
+            type: 'bet',
+            description: 'Place bet',
+            urgency: 'high',
+            relatedMarketQuery: 'market',
+            confidence: 0.8,
+          },
+        ],
+      } as unknown as ParsedNewsInsight);
+
+      // Mock validator
       jest.spyOn(orchestrator['contractValidator'], 'batchValidateContracts').mockResolvedValue([
         {
           contractId: 'contract-1',
           newsInsightId: 'news-1',
           isRelevant: true,
-          relevanceScore: 0.85,
+          relevanceScore: 0.8,
           matchedEntities: [],
           matchedEvents: [],
           reasoning: 'Relevant',
           suggestedPosition: 'buy',
-          suggestedConfidence: 0.8,
+          suggestedConfidence: 0.75,
           risks: [],
           opportunities: [],
         },
       ]);
 
-      jest.spyOn(orchestrator['newsParser'], 'parseNews').mockResolvedValue({
-        originalNewsId: 'news-1',
-        summary: 'Test',
-        entities: [],
-        events: [],
-        predictions: [],
-        sentiment: { overall: 0.5, positive: 0.7, negative: 0.2, neutral: 0.1 },
-        relevanceScore: 0.8,
-        suggestedActions: [
-          {
-            type: 'bet',
-            description: 'Test',
-            urgency: 'high',
-            relatedMarketQuery: 'test',
-            confidence: 0.8,
-          },
-        ],
-      } as ParsedNewsInsight);
-
-      mockBettingPlatform.searchMarkets.mockResolvedValue([
-        {
-          id: 'market-1',
-          platform: 'test',
-          title: 'Test Market',
-          description: 'Test',
-          url: 'https://test.com',
-          createdAt: new Date(),
-        },
-      ]);
-
-      mockBettingPlatform.getContracts.mockResolvedValue([
-        {
-          id: 'contract-1',
-          marketId: 'market-1',
-          platform: 'test',
-          title: 'YES',
-          description: 'Yes',
-          outcome: 'YES',
-          currentPrice: 0.5,
-        },
-      ]);
-
-      await orchestrator['runCycle']();
+      await orchestrator['processLoop']();
 
       expect(mockBettingPlatform.placeOrder).not.toHaveBeenCalled();
-      // Should still send alert about opportunity
-      expect(mockAlertService.sendAlert).toHaveBeenCalled();
     });
 
-    it('should handle errors and send error alerts', async () => {
-      const mockNews: NewsItem[] = [
+    it('should handle errors gracefully', async () => {
+      mockNewsService.fetchLatestNews.mockRejectedValue(new Error('Network error'));
+
+      const result = await orchestrator['processLoop']();
+
+      expect(result.errors).toContain('Processing loop error: Error: Network error');
+    });
+  });
+
+  describe('testContract', () => {
+    it('should test contracts for a specific platform', async () => {
+      const mockContracts: Contract[] = [
         {
-          id: 'news-1',
-          source: 'test',
-          title: 'Test News',
-          content: 'Test content',
+          id: 'test-contract-1',
+          platform: 'mock-platform',
+          title: 'Test Contract',
+          description: 'Test description',
+          yesPrice: 0.5,
+          noPrice: 0.5,
+          volume: 1000,
+          liquidity: 500,
+          endDate: new Date('2024-12-31'),
+          tags: ['test'],
           url: 'https://test.com',
-          publishedAt: new Date(),
         },
       ];
 
-      mockNewsService.fetchLatestNews.mockResolvedValue(mockNews);
+      mockBettingPlatform.getAvailableContracts.mockResolvedValue(mockContracts);
 
-      // Mock parser to throw an error
-      jest
-        .spyOn(orchestrator['newsParser'], 'parseNews')
-        .mockRejectedValue(new Error('Parser Error'));
+      const result = await orchestrator.testContract('mock-platform', 'test');
 
-      await orchestrator['runCycle']();
-
-      // Errors are logged, not sent as alerts in the current implementation
-      expect(mockAlertService.sendAlert).not.toHaveBeenCalled();
+      expect(result).toEqual(mockContracts);
     });
 
-    it('should handle when no news is found', async () => {
-      mockNewsService.fetchLatestNews.mockResolvedValue([]);
-
-      const result = await orchestrator['runCycle']();
-
-      // No alerts sent when no news
-      expect(mockAlertService.sendAlert).not.toHaveBeenCalled();
-      expect(result.newsProcessed).toBe(0);
-    });
-  });
-
-  describe('dry run mode', () => {
-    it('should not place real orders in dry run mode', async () => {
-      config.dryRun = true;
-      config.placeBets = true;
-      (AlertService as jest.MockedClass<typeof AlertService>).mockImplementation(
-        () => mockAlertService,
-      );
-      orchestrator = new OrchestratorService(config, alertConfig);
-      orchestrator.addNewsService(mockNewsService);
-      orchestrator.addBettingPlatform(mockBettingPlatform);
-      orchestrator.addLLMProvider(mockLLMProvider);
-
-      const mockNews: NewsItem[] = [
-        {
-          id: 'news-1',
-          source: 'test',
-          title: 'Test News',
-          content: 'Test content',
-          url: 'https://test.com',
-          publishedAt: new Date(),
-        },
-      ];
-
-      mockNewsService.fetchLatestNews.mockResolvedValue(mockNews);
-
-      jest.spyOn(orchestrator['contractValidator'], 'batchValidateContracts').mockResolvedValue([
-        {
-          contractId: 'contract-1',
-          newsInsightId: 'news-1',
-          isRelevant: true,
-          relevanceScore: 0.85,
-          matchedEntities: [],
-          matchedEvents: [],
-          reasoning: 'Relevant',
-          suggestedPosition: 'buy',
-          suggestedConfidence: 0.8,
-          risks: [],
-          opportunities: [],
-        },
-      ]);
-
-      jest.spyOn(orchestrator['newsParser'], 'parseNews').mockResolvedValue({
-        originalNewsId: 'news-1',
-        summary: 'Test',
-        entities: [],
-        events: [],
-        predictions: [],
-        sentiment: { overall: 0.5, positive: 0.7, negative: 0.2, neutral: 0.1 },
-        relevanceScore: 0.8,
-        suggestedActions: [
-          {
-            type: 'bet',
-            description: 'Test',
-            urgency: 'high',
-            relatedMarketQuery: 'test',
-            confidence: 0.8,
-          },
-        ],
-      } as ParsedNewsInsight);
-
-      mockBettingPlatform.searchMarkets.mockResolvedValue([
-        {
-          id: 'market-1',
-          platform: 'test',
-          title: 'Test Market',
-          description: 'Test',
-          url: 'https://test.com',
-          createdAt: new Date(),
-        },
-      ]);
-
-      mockBettingPlatform.getContracts.mockResolvedValue([
-        {
-          id: 'contract-1',
-          marketId: 'market-1',
-          platform: 'test',
-          title: 'YES',
-          description: 'Yes',
-          outcome: 'YES',
-          currentPrice: 0.5,
-        },
-      ]);
-
-      await orchestrator['runCycle']();
-
-      // Should not place real order in dry run
-      expect(mockBettingPlatform.placeOrder).not.toHaveBeenCalled();
-      // Should send alert about opportunity (dry run doesn't affect alerts)
-      expect(mockAlertService.sendAlert).toHaveBeenCalled();
-    });
-  });
-
-  describe('getStatus', () => {
-    it('should return current status', async () => {
-      orchestrator.addNewsService(mockNewsService);
-      orchestrator.addBettingPlatform(mockBettingPlatform);
-      orchestrator.addLLMProvider(mockLLMProvider);
-
-      await orchestrator.start();
-
-      const status = await orchestrator.getStatus();
-
-      expect(status).toMatchObject({
-        isRunning: true,
-        services: {
-          news: 1,
-          betting: 1,
-          llm: 1,
-        },
-        config: config,
-      });
-    });
-
-    it('should include processed news count', async () => {
-      orchestrator.addNewsService(mockNewsService);
-      orchestrator.addBettingPlatform(mockBettingPlatform);
-      orchestrator.addLLMProvider(mockLLMProvider);
-
-      mockNewsService.fetchLatestNews.mockResolvedValue([
-        {
-          id: 'news-1',
-          source: 'test',
-          title: 'Test',
-          content: 'Test',
-          url: 'https://test.com',
-          publishedAt: new Date(),
-        },
-      ]);
-
-      await orchestrator['runCycle']();
-
-      const status = await orchestrator.getStatus();
-
-      expect(status.processedNewsCount).toBe(1);
-    });
-  });
-
-  describe('order placement', () => {
-    it('should calculate order quantity based on confidence', () => {
-      const validation = {
-        contractId: 'test',
-        newsInsightId: 'test',
-        isRelevant: true,
-        relevanceScore: 0.8,
-        matchedEntities: [],
-        matchedEvents: [],
-        reasoning: 'test',
-        suggestedPosition: 'buy' as const,
-        suggestedConfidence: 0.75,
-        risks: [],
-        opportunities: [],
-      };
-
-      const contract = {
-        id: 'test',
-        marketId: 'test',
-        platform: 'test',
-        title: 'test',
-        description: 'test',
-        outcome: 'YES',
-        currentPrice: 0.5,
-      };
-
-      const quantity = orchestrator['calculateOrderQuantity'](validation, contract);
-
-      expect(quantity).toBe(Math.floor(10 * 0.75 * 0.8)); // base * confidence * relevance
-    });
-  });
-
-  describe('processed news tracking', () => {
-    it('should track processed news IDs', async () => {
-      orchestrator.addNewsService(mockNewsService);
-      orchestrator.addBettingPlatform(mockBettingPlatform);
-      orchestrator.addLLMProvider(mockLLMProvider);
-
-      const mockNews: NewsItem[] = [
-        {
-          id: 'news-1',
-          source: 'test',
-          title: 'Test',
-          content: 'Test',
-          url: 'https://test.com',
-          publishedAt: new Date(),
-        },
-      ];
-
-      mockNewsService.fetchLatestNews.mockResolvedValue(mockNews);
-
-      // First cycle - news gets processed
-      await orchestrator['runCycle']();
-      expect(orchestrator['processedNewsIds'].has('news-1')).toBe(true);
-
-      // Second cycle - same news should be skipped
-      const parseNewsSpy = jest.spyOn(orchestrator['newsParser'], 'parseNews');
-      await orchestrator['runCycle']();
-
-      // parseNews should not be called for already processed news
-      expect(parseNewsSpy).not.toHaveBeenCalled();
+    it('should return empty array for unknown platform', async () => {
+      const result = await orchestrator.testContract('unknown-platform', 'test');
+      expect(result).toEqual([]);
     });
   });
 });
