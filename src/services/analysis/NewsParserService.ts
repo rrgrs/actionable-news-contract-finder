@@ -10,184 +10,394 @@ import {
   SuggestedAction,
 } from '../../types';
 
+interface LLMAnalysisResponse {
+  entities: Array<{
+    type: string;
+    name: string;
+    confidence: number;
+    context?: string;
+  }>;
+  events: Array<{
+    type: string;
+    description: string;
+    date?: string;
+    probability: number;
+    impact: 'low' | 'medium' | 'high';
+  }>;
+  predictions: Array<{
+    outcome: string;
+    probability: number;
+    timeframe: string;
+    confidence: number;
+    reasoning: string;
+  }>;
+  sentiment: {
+    overall: number;
+    positive: number;
+    negative: number;
+    neutral: number;
+  };
+  suggestedActions: Array<{
+    type: string;
+    description: string;
+    urgency: 'low' | 'medium' | 'high';
+    relatedMarketQuery: string;
+    confidence: number;
+  }>;
+  relevanceScore: number;
+  summary: string;
+}
+
 export class NewsParserService implements NewsParser {
   async parseNews(newsItem: NewsItem, llmProvider: LLMProvider): Promise<ParsedNewsInsight> {
-    const systemPrompt = `You are a financial news analyst. Analyze news for market implications and betting opportunities.
-Focus on: entities, events, predictions, sentiment, and actionable insights.`;
+    const systemPrompt = `You are an advanced news analysis AI. Analyze news articles to extract structured insights for decision-making.
+You must respond with valid JSON that matches the exact structure provided. Be thorough and identify ALL relevant entities, events, and market implications.`;
 
-    const prompt = `Analyze this news item for market implications:
+    const prompt = `Analyze this news item and return a JSON response with the following structure:
+{
+  "entities": [
+    {
+      "type": "person|organization|location|product|technology|currency|commodity",
+      "name": "Entity Name",
+      "confidence": 0.0-1.0,
+      "context": "Brief description of entity's role in the news"
+    }
+  ],
+  "events": [
+    {
+      "type": "economic|political|technology|business|regulatory|social|environmental|other",
+      "description": "Clear description of the event",
+      "date": "ISO date if mentioned or null",
+      "probability": 0.0-1.0,
+      "impact": "low|medium|high"
+    }
+  ],
+  "predictions": [
+    {
+      "outcome": "Specific predicted outcome",
+      "probability": 0.0-1.0,
+      "timeframe": "e.g., '1-7 days', '1-3 months', '6-12 months'",
+      "confidence": 0.0-1.0,
+      "reasoning": "Why this prediction is made"
+    }
+  ],
+  "sentiment": {
+    "overall": -1.0 to 1.0 (negative to positive),
+    "positive": 0.0-1.0,
+    "negative": 0.0-1.0,
+    "neutral": 0.0-1.0
+  },
+  "suggestedActions": [
+    {
+      "type": "bet|monitor|research|ignore",
+      "description": "Specific action to take",
+      "urgency": "low|medium|high",
+      "relatedMarketQuery": "Search query for relevant markets (optional)",
+      "confidence": 0.0-1.0
+    }
+  ],
+  "relevanceScore": 0.0-1.0 (how relevant for market/betting opportunities),
+  "summary": "2-3 sentence summary of key implications"
+}
+
+News Item to Analyze:
 Title: ${newsItem.title}
 Content: ${newsItem.content}
+Source: ${newsItem.source}
 Published: ${newsItem.publishedAt}
 Tags: ${newsItem.tags?.join(', ') || 'none'}
+${newsItem.metadata ? `Additional Context: ${JSON.stringify(newsItem.metadata)}` : ''}
 
-Extract:
-1. Key entities (people, organizations, locations)
-2. Important events and their dates
-3. Market predictions with probabilities
-4. Sentiment analysis
-5. Suggested betting actions`;
+Focus on:
+1. ALL mentioned entities (people, companies, organizations, locations, products, etc.)
+2. Current and potential future events
+3. Market predictions and probabilities
+4. Overall sentiment and market implications
+5. Actionable opportunities for betting/prediction markets
+6. Consider both direct and indirect market impacts
 
-    const analysis = await llmProvider.generateCompletion(prompt, systemPrompt);
+Return ONLY valid JSON, no additional text.`;
 
-    const insight: ParsedNewsInsight = {
-      originalNewsId: newsItem.id,
-      summary: newsItem.summary || newsItem.title,
-      entities: this.extractEntities(analysis),
-      events: this.extractEvents(analysis),
-      predictions: this.extractPredictions(analysis),
-      sentiment: this.analyzeSentiment(analysis),
-      relevanceScore: this.calculateRelevance(newsItem, analysis),
-      suggestedActions: this.extractSuggestedActions(analysis),
-      metadata: {
-        processedAt: new Date(),
-        source: newsItem.source,
-      },
-    };
+    try {
+      const analysis = await llmProvider.generateCompletion(prompt, systemPrompt);
 
-    return insight;
+      // Parse the LLM response
+      const parsedAnalysis = this.parseJSONResponse(analysis);
+
+      const insight: ParsedNewsInsight = {
+        originalNewsId: newsItem.id,
+        summary: parsedAnalysis.summary || newsItem.summary || newsItem.title,
+        entities: this.validateEntities(parsedAnalysis.entities),
+        events: this.validateEvents(parsedAnalysis.events),
+        predictions: this.validatePredictions(parsedAnalysis.predictions),
+        sentiment: this.validateSentiment(parsedAnalysis.sentiment),
+        relevanceScore: this.validateRelevanceScore(parsedAnalysis.relevanceScore),
+        suggestedActions: this.validateSuggestedActions(parsedAnalysis.suggestedActions),
+        metadata: {
+          processedAt: new Date(),
+          source: newsItem.source,
+          llmModel: llmProvider.name,
+        },
+      };
+
+      return insight;
+    } catch (error) {
+      console.error('Error parsing news with LLM:', error);
+      // Fallback to basic analysis if LLM fails
+      return this.createFallbackInsight(newsItem);
+    }
   }
 
   async batchParseNews(
     newsItems: NewsItem[],
     llmProvider: LLMProvider,
   ): Promise<ParsedNewsInsight[]> {
-    const insights = await Promise.all(newsItems.map((item) => this.parseNews(item, llmProvider)));
-    return insights;
+    // Process in batches to avoid overwhelming the LLM
+    const batchSize = 5;
+    const results: ParsedNewsInsight[] = [];
+
+    for (let i = 0; i < newsItems.length; i += batchSize) {
+      const batch = newsItems.slice(i, i + batchSize);
+      const batchResults = await Promise.all(
+        batch.map((item) => this.parseNews(item, llmProvider)),
+      );
+      results.push(...batchResults);
+    }
+
+    return results;
   }
 
-  private extractEntities(analysis: string): Entity[] {
-    const entities: Entity[] = [];
+  private parseJSONResponse(response: string): LLMAnalysisResponse {
+    // Try to extract JSON from the response
+    let jsonStr = response.trim();
 
-    if (analysis.includes('Federal Reserve') || analysis.includes('Fed')) {
-      entities.push({
-        type: 'organization',
-        name: 'Federal Reserve',
-        confidence: 0.95,
-        context: 'Central banking authority',
-      });
+    // Handle case where LLM wraps JSON in markdown code blocks
+    const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[1];
     }
 
-    if (analysis.includes('Tesla')) {
-      entities.push({
-        type: 'organization',
-        name: 'Tesla',
-        confidence: 0.95,
-        context: 'Electric vehicle manufacturer',
-      });
+    // Handle case where LLM includes text before/after JSON
+    const jsonStart = jsonStr.indexOf('{');
+    const jsonEnd = jsonStr.lastIndexOf('}');
+    if (jsonStart !== -1 && jsonEnd !== -1) {
+      jsonStr = jsonStr.substring(jsonStart, jsonEnd + 1);
     }
 
-    return entities;
+    try {
+      return JSON.parse(jsonStr) as LLMAnalysisResponse;
+    } catch (error) {
+      console.error('Failed to parse LLM JSON response:', error);
+      console.error('Response was:', jsonStr);
+      // Return empty structure
+      return {
+        entities: [],
+        events: [],
+        predictions: [],
+        sentiment: { overall: 0, positive: 0, negative: 0, neutral: 1 },
+        suggestedActions: [],
+        relevanceScore: 0.5,
+        summary: '',
+      };
+    }
   }
 
-  private extractEvents(analysis: string): Event[] {
-    const events: Event[] = [];
-
-    if (analysis.includes('rate cut')) {
-      events.push({
-        type: 'monetary_policy',
-        description: 'Federal Reserve interest rate cut',
-        probability: 0.8,
-        impact: 'high',
-      });
+  private validateEntities(entities: unknown): Entity[] {
+    if (!Array.isArray(entities)) {
+      return [];
     }
 
-    if (analysis.includes('battery breakthrough')) {
-      events.push({
-        type: 'technology',
-        description: 'Battery technology advancement',
-        probability: 0.75,
-        impact: 'medium',
+    return entities
+      .filter((e) => {
+        return (
+          typeof e === 'object' &&
+          e !== null &&
+          typeof e.type === 'string' &&
+          typeof e.name === 'string'
+        );
+      })
+      .map((e) => {
+        const entity = e as Record<string, unknown>;
+        return {
+          type: entity.type as 'person' | 'organization' | 'location' | 'other',
+          name: entity.name as string,
+          confidence:
+            typeof entity.confidence === 'number'
+              ? Math.max(0, Math.min(1, entity.confidence))
+              : 0.5,
+          context: entity.context as string | undefined,
+        };
       });
-    }
-
-    return events;
   }
 
-  private extractPredictions(analysis: string): Prediction[] {
-    const predictions: Prediction[] = [];
-
-    if (analysis.includes('rally') || analysis.includes('market up')) {
-      predictions.push({
-        outcome: 'Stock market rally',
-        probability: 0.7,
-        timeframe: 'Short-term (1-3 months)',
-        confidence: 0.75,
-        reasoning: 'Monetary policy easing typically supports equity markets',
-      });
+  private validateEvents(events: unknown): Event[] {
+    if (!Array.isArray(events)) {
+      return [];
     }
 
-    return predictions;
+    return events
+      .filter((e): e is Event => {
+        return (
+          typeof e === 'object' &&
+          e !== null &&
+          typeof e.type === 'string' &&
+          typeof e.description === 'string'
+        );
+      })
+      .map((e) => {
+        let eventDate: Date | undefined;
+        if (e.date) {
+          const parsed = new Date(e.date);
+          eventDate = isNaN(parsed.getTime()) ? undefined : parsed;
+        }
+        return {
+          type: e.type,
+          description: e.description,
+          date: eventDate,
+          probability:
+            typeof e.probability === 'number' ? Math.max(0, Math.min(1, e.probability)) : 0.5,
+          impact: (['low', 'medium', 'high'].includes(e.impact as string) ? e.impact : 'medium') as
+            | 'low'
+            | 'medium'
+            | 'high',
+        };
+      });
   }
 
-  private analyzeSentiment(analysis: string): Sentiment {
-    let positive = 0;
-    let negative = 0;
+  private validatePredictions(predictions: unknown): Prediction[] {
+    if (!Array.isArray(predictions)) {
+      return [];
+    }
 
-    const positiveWords = ['rally', 'breakthrough', 'increase', 'improve', 'advance'];
-    const negativeWords = ['concern', 'decline', 'risk', 'threat', 'worry'];
+    return predictions
+      .filter((p): p is Prediction => {
+        return (
+          typeof p === 'object' &&
+          p !== null &&
+          typeof p.outcome === 'string' &&
+          typeof p.probability === 'number'
+        );
+      })
+      .map((p) => ({
+        outcome: p.outcome,
+        probability: Math.max(0, Math.min(1, p.probability)),
+        timeframe: p.timeframe || 'Unknown',
+        confidence: typeof p.confidence === 'number' ? Math.max(0, Math.min(1, p.confidence)) : 0.5,
+        reasoning: p.reasoning || '',
+      }));
+  }
+
+  private validateSentiment(sentiment: unknown): Sentiment {
+    const defaultSentiment = { overall: 0, positive: 0, negative: 0, neutral: 1 };
+
+    if (typeof sentiment !== 'object' || sentiment === null) {
+      return defaultSentiment;
+    }
+
+    const s = sentiment as Record<string, unknown>;
+    return {
+      overall: typeof s.overall === 'number' ? Math.max(-1, Math.min(1, s.overall)) : 0,
+      positive: typeof s.positive === 'number' ? Math.max(0, Math.min(1, s.positive)) : 0,
+      negative: typeof s.negative === 'number' ? Math.max(0, Math.min(1, s.negative)) : 0,
+      neutral: typeof s.neutral === 'number' ? Math.max(0, Math.min(1, s.neutral)) : 1,
+    };
+  }
+
+  private validateRelevanceScore(score: unknown): number {
+    if (typeof score !== 'number') {
+      return 0.5;
+    }
+    return Math.max(0, Math.min(1, score));
+  }
+
+  private validateSuggestedActions(actions: unknown): SuggestedAction[] {
+    if (!Array.isArray(actions)) {
+      return [];
+    }
+
+    return actions
+      .filter((a): a is SuggestedAction => {
+        return (
+          typeof a === 'object' &&
+          a !== null &&
+          typeof a.type === 'string' &&
+          typeof a.description === 'string'
+        );
+      })
+      .map((a) => ({
+        type: a.type as 'bet' | 'monitor' | 'research' | 'ignore',
+        description: a.description,
+        urgency: (['low', 'medium', 'high'].includes(a.urgency as string)
+          ? a.urgency
+          : 'medium') as 'low' | 'medium' | 'high',
+        relatedMarketQuery: a.relatedMarketQuery,
+        confidence: typeof a.confidence === 'number' ? Math.max(0, Math.min(1, a.confidence)) : 0.5,
+      }));
+  }
+
+  private createFallbackInsight(newsItem: NewsItem): ParsedNewsInsight {
+    // Basic fallback analysis when LLM fails
+    const content = `${newsItem.title} ${newsItem.content}`.toLowerCase();
+
+    // Simple sentiment based on word counts
+    const positiveWords = [
+      'gain',
+      'rise',
+      'increase',
+      'improve',
+      'success',
+      'win',
+      'profit',
+      'growth',
+    ];
+    const negativeWords = [
+      'loss',
+      'fall',
+      'decrease',
+      'decline',
+      'fail',
+      'lose',
+      'deficit',
+      'crash',
+    ];
+
+    let posCount = 0;
+    let negCount = 0;
 
     positiveWords.forEach((word) => {
-      if (analysis.toLowerCase().includes(word)) {
-        positive++;
+      if (content.includes(word)) {
+        posCount++;
       }
     });
 
     negativeWords.forEach((word) => {
-      if (analysis.toLowerCase().includes(word)) {
-        negative++;
+      if (content.includes(word)) {
+        negCount++;
       }
     });
 
-    const total = positive + negative || 1;
+    const total = posCount + negCount || 1;
+    const sentiment: Sentiment = {
+      overall: (posCount - negCount) / total,
+      positive: posCount / total,
+      negative: negCount / total,
+      neutral: Math.max(0, 1 - (posCount + negCount) / total),
+    };
 
     return {
-      overall: (positive - negative) / total,
-      positive: positive / total,
-      negative: negative / total,
-      neutral: 1 - (positive + negative) / total,
+      originalNewsId: newsItem.id,
+      summary: newsItem.summary || newsItem.title,
+      entities: [],
+      events: [],
+      predictions: [],
+      sentiment,
+      relevanceScore: 0.5,
+      suggestedActions: [],
+      metadata: {
+        processedAt: new Date(),
+        source: newsItem.source,
+        fallbackAnalysis: true,
+      },
     };
-  }
-
-  private calculateRelevance(newsItem: NewsItem, analysis: string): number {
-    let score = 0.5;
-
-    if (newsItem.metadata?.importance === 'high') {
-      score += 0.2;
-    }
-    if (analysis.includes('significant') || analysis.includes('major')) {
-      score += 0.15;
-    }
-    if (newsItem.tags && newsItem.tags.length > 2) {
-      score += 0.1;
-    }
-
-    return Math.min(score, 1.0);
-  }
-
-  private extractSuggestedActions(analysis: string): SuggestedAction[] {
-    const actions: SuggestedAction[] = [];
-
-    if (analysis.includes('rate cut') || analysis.includes('Fed')) {
-      actions.push({
-        type: 'bet',
-        description: 'Consider positions on interest rate futures or Fed policy markets',
-        urgency: 'high',
-        relatedMarketQuery: 'federal reserve rate cut',
-        confidence: 0.8,
-      });
-    }
-
-    if (analysis.includes('Tesla') || analysis.includes('battery')) {
-      actions.push({
-        type: 'bet',
-        description: 'Look for Tesla stock price or EV sector markets',
-        urgency: 'medium',
-        relatedMarketQuery: 'tesla stock price',
-        confidence: 0.75,
-      });
-    }
-
-    return actions;
   }
 }
