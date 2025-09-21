@@ -10,6 +10,8 @@ import {
 } from '../../types';
 import { NewsParserService } from '../analysis/NewsParserService';
 import { ContractValidatorService } from '../analysis/ContractValidatorService';
+import { AlertService, AlertPayload } from '../alerts/AlertService';
+import { AlertConfig } from '../../config/types';
 
 export interface OrchestratorConfig {
   pollIntervalMs: number;
@@ -17,6 +19,7 @@ export interface OrchestratorConfig {
   minConfidenceScore: number;
   maxPositionsPerContract: number;
   dryRun: boolean;
+  placeBets: boolean;
 }
 
 export interface ProcessingResult {
@@ -25,6 +28,7 @@ export interface ProcessingResult {
   marketsSearched: number;
   contractsValidated: number;
   positionsCreated: number;
+  alertsSent: number;
   errors: string[];
 }
 
@@ -34,14 +38,21 @@ export class OrchestratorService {
   private llmProviders: LLMProvider[] = [];
   private newsParser: NewsParserService;
   private contractValidator: ContractValidatorService;
+  private alertService?: AlertService;
   private config: OrchestratorConfig;
   private isRunning = false;
   private pollInterval?: NodeJS.Timeout;
+  private processedNewsIds = new Set<string>();
+  private activePositions = new Map<string, Position[]>();
 
-  constructor(config: OrchestratorConfig) {
+  constructor(config: OrchestratorConfig, alertConfig?: AlertConfig) {
     this.config = config;
     this.newsParser = new NewsParserService();
     this.contractValidator = new ContractValidatorService();
+
+    if (alertConfig && alertConfig.type !== 'none') {
+      this.alertService = new AlertService(alertConfig);
+    }
   }
 
   addNewsService(service: NewsService): void {
@@ -66,6 +77,25 @@ export class OrchestratorService {
     }
 
     console.log('Starting orchestrator service...');
+
+    // Test alert connection if configured
+    if (this.alertService) {
+      console.log('Testing alert service connection...');
+      const alertTestSuccess = await this.alertService.testConnection();
+      if (!alertTestSuccess) {
+        console.warn('Alert service test failed, but continuing...');
+      }
+    }
+
+    // Display bet placement configuration
+    if (!this.config.placeBets) {
+      console.log('⚠️  BET PLACEMENT IS DISABLED - Will only find and alert on opportunities');
+    } else if (this.config.dryRun) {
+      console.log('📝 DRY RUN MODE - Will simulate bet placement without real orders');
+    } else {
+      console.log('💰 LIVE MODE - Will place real bets when opportunities are found');
+    }
+
     this.isRunning = true;
 
     await this.runCycle();
@@ -100,6 +130,7 @@ export class OrchestratorService {
       marketsSearched: 0,
       contractsValidated: 0,
       positionsCreated: 0,
+      alertsSent: 0,
       errors: [],
     };
 
@@ -123,29 +154,118 @@ export class OrchestratorService {
           continue;
         }
 
-        const validatedContracts = await this.findAndValidateContracts(insight);
-        result.contractsValidated += validatedContracts.length;
+        // Find relevant betting opportunities
+        for (const action of insight.suggestedActions) {
+          if (action.type !== 'bet' || !action.relatedMarketQuery) {
+            continue;
+          }
 
-        for (const validation of validatedContracts) {
-          if (
-            validation.suggestedConfidence >= this.config.minConfidenceScore &&
-            validation.suggestedPosition !== 'hold'
-          ) {
-            if (this.config.dryRun) {
-              console.log(
-                `[DRY RUN] Would place ${validation.suggestedPosition} order for contract ${validation.contractId}`,
-              );
-              result.positionsCreated++;
-            } else {
-              const position = await this.placeOrder(validation);
-              if (position) {
-                result.positionsCreated++;
-                console.log(`Created position: ${position.id}`);
+          for (const platform of this.bettingPlatforms) {
+            try {
+              const markets = await platform.searchMarkets(action.relatedMarketQuery);
+              result.marketsSearched += markets.length;
+
+              for (const market of markets.slice(0, 3)) {
+                const contracts = await platform.getContracts(market.id);
+                const contractValidations = await this.contractValidator.batchValidateContracts(
+                  contracts,
+                  insight,
+                  this.llmProviders[0],
+                );
+                result.contractsValidated += contractValidations.length;
+
+                // Process validated contracts
+                for (const validation of contractValidations) {
+                  if (
+                    validation.isRelevant &&
+                    validation.suggestedConfidence >= this.config.minConfidenceScore &&
+                    validation.suggestedPosition !== 'hold'
+                  ) {
+                    const contract = contracts.find((c) => c.id === validation.contractId);
+                    if (!contract) {
+                      continue;
+                    }
+
+                    const newsItem = allNews.find((n) => n.id === insight.originalNewsId);
+
+                    // Send alert if configured
+                    if (this.alertService && newsItem) {
+                      const alertPayload: AlertPayload = {
+                        newsTitle: newsItem.title,
+                        newsUrl: newsItem.url,
+                        marketTitle: market.title,
+                        marketUrl: market.url || '',
+                        contractTitle: contract.title,
+                        suggestedPosition: (validation.suggestedPosition || 'buy') as
+                          | 'buy'
+                          | 'sell',
+                        confidence: validation.suggestedConfidence,
+                        currentPrice: contract.currentPrice || 0,
+                        reasoning: validation.reasoning,
+                        timestamp: new Date(),
+                      };
+
+                      try {
+                        await this.alertService.sendAlert(alertPayload);
+                        result.alertsSent++;
+                      } catch (error) {
+                        console.error('Failed to send alert:', error);
+                        result.errors.push(`Alert failed: ${error}`);
+                      }
+                    }
+
+                    // Handle bet placement
+                    const quantity = this.calculateOrderQuantity(validation, contract);
+
+                    if (!this.config.placeBets) {
+                      console.log(
+                        `  📊 [BETS DISABLED] Found opportunity: ${validation.suggestedPosition} ${quantity} shares of "${contract.title}" at $${contract.currentPrice}`,
+                      );
+                      console.log(`     Market: ${market.title}`);
+                      console.log(
+                        `     Confidence: ${Math.round(validation.suggestedConfidence * 100)}%`,
+                      );
+                      console.log(`     Reasoning: ${validation.reasoning}`);
+                      result.positionsCreated++; // Count as found opportunity
+                    } else if (this.config.dryRun) {
+                      console.log(
+                        `  📝 [DRY RUN] Would place ${validation.suggestedPosition} order for ${quantity} shares at $${contract.currentPrice}`,
+                      );
+                      result.positionsCreated++;
+                    } else {
+                      try {
+                        const position = await platform.placeOrder(
+                          contract.id,
+                          validation.suggestedPosition || 'buy',
+                          quantity,
+                          contract.currentPrice,
+                        );
+
+                        console.log(
+                          `  ✅ Placed ${validation.suggestedPosition} order for ${quantity} shares`,
+                        );
+                        result.positionsCreated++;
+
+                        // Track position
+                        if (position) {
+                          const positions = this.activePositions.get(contract.id) || [];
+                          positions.push(position);
+                          this.activePositions.set(contract.id, positions);
+                        }
+                      } catch (error) {
+                        console.error(`  ❌ Failed to place order:`, error);
+                        result.errors.push(`Order placement failed: ${error}`);
+                      }
+                    }
+                  }
+                }
               }
+            } catch (error) {
+              console.error(`Error searching markets on ${platform.name}:`, error);
+              result.errors.push(`Market search failed on ${platform.name}: ${error}`);
             }
           }
         }
-        result.marketsSearched++;
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -163,10 +283,21 @@ export class OrchestratorService {
     for (const service of this.newsServices) {
       try {
         const news = await service.fetchLatestNews();
-        allNews.push(...news);
+        // Filter out already processed news
+        const newItems = news.filter((item) => !this.processedNewsIds.has(item.id));
+        allNews.push(...newItems);
+
+        // Mark as processed
+        newItems.forEach((item) => this.processedNewsIds.add(item.id));
       } catch (error) {
         console.error(`Error fetching news from ${service.name}:`, error);
       }
+    }
+
+    // Clean up old processed IDs (keep only last 1000)
+    if (this.processedNewsIds.size > 1000) {
+      const idsArray = Array.from(this.processedNewsIds);
+      this.processedNewsIds = new Set(idsArray.slice(-1000));
     }
 
     return allNews.sort((a, b) => b.publishedAt.getTime() - a.publishedAt.getTime());
@@ -193,76 +324,6 @@ export class OrchestratorService {
     return insights;
   }
 
-  private async findAndValidateContracts(
-    insight: ParsedNewsInsight,
-  ): Promise<ContractValidation[]> {
-    const validations: ContractValidation[] = [];
-
-    if (this.llmProviders.length === 0 || this.bettingPlatforms.length === 0) {
-      return validations;
-    }
-
-    const llmProvider = this.llmProviders[0];
-
-    for (const action of insight.suggestedActions) {
-      if (action.type !== 'bet' || !action.relatedMarketQuery) {
-        continue;
-      }
-
-      for (const platform of this.bettingPlatforms) {
-        try {
-          const markets = await platform.searchMarkets(action.relatedMarketQuery);
-
-          for (const market of markets.slice(0, 3)) {
-            const contracts = await platform.getContracts(market.id);
-            const contractValidations = await this.contractValidator.batchValidateContracts(
-              contracts,
-              insight,
-              llmProvider,
-            );
-            validations.push(...contractValidations);
-          }
-        } catch (error) {
-          console.error(`Error searching markets on ${platform.name}:`, error);
-        }
-      }
-    }
-
-    return validations
-      .filter((v) => v.isRelevant)
-      .sort((a, b) => b.relevanceScore - a.relevanceScore)
-      .slice(0, 5);
-  }
-
-  private async placeOrder(validation: ContractValidation): Promise<Position | null> {
-    if (!validation.suggestedPosition || validation.suggestedPosition === 'hold') {
-      return null;
-    }
-
-    for (const platform of this.bettingPlatforms) {
-      try {
-        const contract = await platform.getContract(validation.contractId);
-
-        const quantity = this.calculateOrderQuantity(validation, contract);
-        const position = await platform.placeOrder(
-          contract.id,
-          validation.suggestedPosition,
-          quantity,
-          contract.currentPrice,
-        );
-
-        console.log(
-          `Placed ${validation.suggestedPosition} order: ${quantity} contracts at ${contract.currentPrice}`,
-        );
-        return position;
-      } catch (error) {
-        console.error(`Error placing order on ${platform.name}:`, error);
-      }
-    }
-
-    return null;
-  }
-
   private calculateOrderQuantity(validation: ContractValidation, _contract: Contract): number {
     const baseQuantity = 10;
     const confidenceMultiplier = validation.suggestedConfidence;
@@ -275,6 +336,9 @@ export class OrchestratorService {
     isRunning: boolean;
     services: { news: number; betting: number; llm: number };
     config: OrchestratorConfig;
+    alertsEnabled: boolean;
+    processedNewsCount: number;
+    activePositionsCount: number;
   }> {
     return {
       isRunning: this.isRunning,
@@ -284,6 +348,9 @@ export class OrchestratorService {
         llm: this.llmProviders.length,
       },
       config: this.config,
+      alertsEnabled: !!this.alertService,
+      processedNewsCount: this.processedNewsIds.size,
+      activePositionsCount: this.activePositions.size,
     };
   }
 }

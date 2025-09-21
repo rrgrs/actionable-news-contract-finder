@@ -3,7 +3,7 @@ import { ConfigLoader } from './config/ConfigLoader';
 import { NewsServiceRegistry } from './services/news/NewsServiceRegistry';
 import { BettingPlatformRegistry } from './services/betting/BettingPlatformRegistry';
 import { LLMProviderRegistry } from './services/llm/LLMProviderRegistry';
-import { OrchestratorServiceV2 } from './services/orchestrator/OrchestratorServiceV2';
+import { OrchestratorService } from './services/orchestrator/OrchestratorService';
 
 dotenv.config();
 
@@ -26,7 +26,7 @@ async function main() {
     await ConfigLoader.validateConfiguration(config);
 
     // Create orchestrator with alert configuration
-    const orchestrator = new OrchestratorServiceV2(config.orchestrator, config.alerts);
+    const orchestrator = new OrchestratorService(config.orchestrator, config.alerts);
 
     // Load and register all services
     console.log('📦 Loading and initializing services...\n');
