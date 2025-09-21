@@ -8,7 +8,7 @@ export interface NewsItem {
   publishedAt: Date;
   author?: string;
   tags?: string[];
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface NewsServiceConfig {
@@ -17,7 +17,7 @@ export interface NewsServiceConfig {
   baseUrl?: string;
   pollInterval?: number;
   maxItemsPerPoll?: number;
-  customConfig?: Record<string, any>;
+  customConfig?: Record<string, unknown>;
 }
 
 export interface NewsService {

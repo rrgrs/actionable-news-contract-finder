@@ -33,7 +33,7 @@ export class MockLLMProvider implements LLMProvider {
 
   async generateStructuredOutput<T>(
     _prompt: string,
-    schema: any,
+    schema: unknown,
     _systemPrompt?: string,
   ): Promise<T> {
     if (!this.isInitialized) {

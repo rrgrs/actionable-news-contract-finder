@@ -8,7 +8,7 @@ export interface Market {
   expiresAt?: Date;
   volume?: number;
   liquidity?: number;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface Contract {
@@ -22,7 +22,7 @@ export interface Contract {
   previousPrice?: number;
   volume?: number;
   expiresAt?: Date;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface Position {
@@ -34,7 +34,7 @@ export interface Position {
   price: number;
   timestamp: Date;
   status: 'pending' | 'filled' | 'cancelled' | 'failed';
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface BettingPlatformConfig {
@@ -43,7 +43,7 @@ export interface BettingPlatformConfig {
   apiSecret?: string;
   baseUrl?: string;
   testMode?: boolean;
-  customConfig?: Record<string, any>;
+  customConfig?: Record<string, unknown>;
 }
 
 export interface BettingPlatform {

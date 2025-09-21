@@ -7,7 +7,7 @@ export interface ParsedNewsInsight {
   sentiment: Sentiment;
   relevanceScore: number;
   suggestedActions: SuggestedAction[];
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface Entity {
@@ -55,14 +55,14 @@ export interface LLMProviderConfig {
   temperature?: number;
   maxTokens?: number;
   baseUrl?: string;
-  customConfig?: Record<string, any>;
+  customConfig?: Record<string, unknown>;
 }
 
 export interface LLMProvider {
   name: string;
   initialize(config: LLMProviderConfig): Promise<void>;
   generateCompletion(prompt: string, systemPrompt?: string): Promise<string>;
-  generateStructuredOutput<T>(prompt: string, schema: any, systemPrompt?: string): Promise<T>;
+  generateStructuredOutput<T>(prompt: string, schema: unknown, systemPrompt?: string): Promise<T>;
   isHealthy(): Promise<boolean>;
   destroy(): Promise<void>;
 }

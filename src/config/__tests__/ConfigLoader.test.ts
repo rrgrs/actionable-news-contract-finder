@@ -2,6 +2,22 @@ import { ConfigLoader } from '../ConfigLoader';
 import * as path from 'path';
 import { NewsServicePlugin, BettingPlatformPlugin, LLMProviderPlugin } from '../../types';
 
+// Type definitions for mock registries
+type MockNewsRegistry = {
+  registerPlugin: jest.Mock;
+  createService: jest.Mock;
+};
+
+type MockBettingRegistry = {
+  registerPlugin: jest.Mock;
+  createPlatform: jest.Mock;
+};
+
+type MockLLMRegistry = {
+  registerPlugin: jest.Mock;
+  createProvider: jest.Mock;
+};
+
 describe('ConfigLoader', () => {
   const originalEnv = process.env;
 
@@ -27,6 +43,8 @@ describe('ConfigLoader', () => {
       process.env.DRY_RUN = 'false';
       process.env.PLACE_BETS = 'true';
       process.env.LOG_LEVEL = 'debug';
+      // Explicitly unset ALERT_TYPE to test default
+      delete process.env.ALERT_TYPE;
 
       const config = ConfigLoader.loadConfig();
 
@@ -343,17 +361,17 @@ describe('ConfigLoader', () => {
         alerts: { type: 'none' as const },
       };
 
-      const mockNewsRegistry = {
+      const mockNewsRegistry: MockNewsRegistry = {
         registerPlugin: jest.fn(),
         createService: jest.fn().mockResolvedValue({ name: 'mock-news-instance' }),
       };
 
-      const mockBettingRegistry = {
+      const mockBettingRegistry: MockBettingRegistry = {
         registerPlugin: jest.fn(),
         createPlatform: jest.fn().mockResolvedValue({ name: 'mock-betting-instance' }),
       };
 
-      const mockLLMRegistry = {
+      const mockLLMRegistry: MockLLMRegistry = {
         registerPlugin: jest.fn(),
         createProvider: jest.fn().mockResolvedValue({ name: 'mock-llm-instance' }),
       };
@@ -362,9 +380,9 @@ describe('ConfigLoader', () => {
 
       const result = await ConfigLoader.loadAndRegisterServices(
         config,
-        mockNewsRegistry,
-        mockBettingRegistry,
-        mockLLMRegistry,
+        mockNewsRegistry as unknown as typeof import('../../services/news/NewsServiceRegistry').NewsServiceRegistry,
+        mockBettingRegistry as unknown as typeof import('../../services/betting/BettingPlatformRegistry').BettingPlatformRegistry,
+        mockLLMRegistry as unknown as typeof import('../../services/llm/LLMProviderRegistry').LLMProviderRegistry,
       );
 
       expect(result.newsServices).toHaveLength(1);

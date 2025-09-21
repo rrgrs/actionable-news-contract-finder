@@ -1,18 +1,24 @@
 import { AlertService, AlertPayload } from '../AlertService';
 import { AlertConfig } from '../../../config/types';
 import * as nodemailer from 'nodemailer';
+import * as childProcess from 'child_process';
 
 // Mock nodemailer
 jest.mock('nodemailer');
 
 // Mock child_process for system notifications
 jest.mock('child_process', () => ({
-  exec: jest.fn((_cmd: string, callback: any) => callback(null, 'success', '')),
+  exec: jest.fn(
+    (_cmd: string, callback: (error: Error | null, stdout: string, stderr: string) => void) =>
+      callback(null, 'success', ''),
+  ),
 }));
 
 describe('AlertService', () => {
   let alertService: AlertService;
-  let mockTransporter: any;
+  let mockTransporter: {
+    sendMail: jest.Mock;
+  };
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -123,7 +129,7 @@ describe('AlertService', () => {
           from: 'sender@example.com',
           to: 'test@example.com',
           subject: expect.stringContaining('Trading Opportunity'),
-        })
+        }),
       );
     });
 
@@ -131,7 +137,7 @@ describe('AlertService', () => {
       const config: AlertConfig = { type: 'system' };
       alertService = new AlertService(config);
 
-      const { exec } = require('child_process');
+      const { exec } = childProcess as unknown as { exec: jest.Mock };
       await alertService.sendAlert(mockPayload);
 
       expect(exec).toHaveBeenCalled();
@@ -148,7 +154,7 @@ describe('AlertService', () => {
       };
       alertService = new AlertService(config);
 
-      const { exec } = require('child_process');
+      const { exec } = childProcess as unknown as { exec: jest.Mock };
       await alertService.sendAlert(mockPayload);
 
       expect(mockTransporter.sendMail).toHaveBeenCalled();
@@ -273,9 +279,10 @@ describe('AlertService', () => {
       const config: AlertConfig = { type: 'system' };
       alertService = new AlertService(config);
 
-      const { exec } = require('child_process');
-      exec.mockImplementationOnce((_cmd: string, callback: any) =>
-        callback(new Error('Notification error'), '', 'error')
+      const { exec } = childProcess as unknown as { exec: jest.Mock };
+      exec.mockImplementationOnce(
+        (_cmd: string, callback: (error: Error | null, stdout: string, stderr: string) => void) =>
+          callback(new Error('Notification error'), '', 'error'),
       );
 
       await expect(alertService.sendAlert(mockPayload)).resolves.not.toThrow();
@@ -313,7 +320,7 @@ describe('AlertService', () => {
         expect.objectContaining({
           subject: expect.stringContaining('Trading Opportunity'),
           html: expect.stringContaining('Error'),
-        })
+        }),
       );
     });
 
@@ -346,7 +353,7 @@ describe('AlertService', () => {
       expect(mockTransporter.sendMail).toHaveBeenCalledWith(
         expect.objectContaining({
           html: expect.stringContaining('95%'),
-        })
+        }),
       );
     });
   });
@@ -358,7 +365,7 @@ describe('AlertService', () => {
       const config: AlertConfig = { type: 'system' };
       alertService = new AlertService(config);
 
-      const { exec } = require('child_process');
+      const { exec } = childProcess as unknown as { exec: jest.Mock };
       await alertService.sendAlert({
         newsTitle: 'Test',
         newsUrl: 'https://news.com',
@@ -372,10 +379,7 @@ describe('AlertService', () => {
         timestamp: new Date(),
       });
 
-      expect(exec).toHaveBeenCalledWith(
-        expect.stringContaining('osascript'),
-        expect.any(Function)
-      );
+      expect(exec).toHaveBeenCalledWith(expect.stringContaining('osascript'), expect.any(Function));
     });
 
     it('should use correct command for Windows', async () => {
@@ -384,7 +388,7 @@ describe('AlertService', () => {
       const config: AlertConfig = { type: 'system' };
       alertService = new AlertService(config);
 
-      const { exec } = require('child_process');
+      const { exec } = childProcess as unknown as { exec: jest.Mock };
       await alertService.sendAlert({
         newsTitle: 'Test',
         newsUrl: 'https://news.com',
@@ -400,7 +404,7 @@ describe('AlertService', () => {
 
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining('powershell'),
-        expect.any(Function)
+        expect.any(Function),
       );
     });
 
@@ -410,7 +414,7 @@ describe('AlertService', () => {
       const config: AlertConfig = { type: 'system' };
       alertService = new AlertService(config);
 
-      const { exec } = require('child_process');
+      const { exec } = childProcess as unknown as { exec: jest.Mock };
       await alertService.sendAlert({
         newsTitle: 'Test',
         newsUrl: 'https://news.com',
@@ -426,7 +430,7 @@ describe('AlertService', () => {
 
       expect(exec).toHaveBeenCalledWith(
         expect.stringContaining('notify-send'),
-        expect.any(Function)
+        expect.any(Function),
       );
     });
   });

@@ -1,7 +1,7 @@
 export interface ServiceConfig {
   name: string;
   fileName: string;
-  config: Record<string, any>;
+  config: Record<string, unknown>;
 }
 
 export type AlertType = 'none' | 'email' | 'system' | 'both';

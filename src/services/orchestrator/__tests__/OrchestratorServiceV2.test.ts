@@ -44,10 +44,13 @@ describe('OrchestratorServiceV2', () => {
     // Create mock alert service
     mockAlertService = {
       sendAlert: jest.fn().mockResolvedValue(undefined),
-    } as any;
+      testConnection: jest.fn().mockResolvedValue(true),
+    } as unknown as jest.Mocked<AlertService>;
 
     // Mock AlertService constructor
-    (AlertService as jest.MockedClass<typeof AlertService>).mockImplementation(() => mockAlertService);
+    (AlertService as jest.MockedClass<typeof AlertService>).mockImplementation(
+      () => mockAlertService,
+    );
 
     orchestrator = new OrchestratorServiceV2(config, alertConfig);
 
@@ -134,7 +137,9 @@ describe('OrchestratorServiceV2', () => {
     });
 
     it('should run cycle on interval', async () => {
-      const runCycleSpy = jest.spyOn(orchestrator as any, 'runCycle').mockResolvedValue({});
+      const runCycleSpy = jest
+        .spyOn(orchestrator as unknown as { runCycle: () => Promise<void> }, 'runCycle')
+        .mockResolvedValue();
 
       await orchestrator.start();
 
@@ -265,13 +270,15 @@ describe('OrchestratorServiceV2', () => {
           confidence: 0.9,
           contractTitle: expect.any(String),
           marketUrl: expect.any(String),
-        })
+        }),
       );
     });
 
     it('should place bets when placeBets is true', async () => {
       config.placeBets = true;
-      (AlertService as jest.MockedClass<typeof AlertService>).mockImplementation(() => mockAlertService);
+      (AlertService as jest.MockedClass<typeof AlertService>).mockImplementation(
+        () => mockAlertService,
+      );
       orchestrator = new OrchestratorServiceV2(config, alertConfig);
       orchestrator.addNewsService(mockNewsService);
       orchestrator.addBettingPlatform(mockBettingPlatform);
@@ -369,7 +376,9 @@ describe('OrchestratorServiceV2', () => {
 
     it('should not place bets when placeBets is false', async () => {
       config.placeBets = false;
-      (AlertService as jest.MockedClass<typeof AlertService>).mockImplementation(() => mockAlertService);
+      (AlertService as jest.MockedClass<typeof AlertService>).mockImplementation(
+        () => mockAlertService,
+      );
       orchestrator = new OrchestratorServiceV2(config, alertConfig);
       orchestrator.addNewsService(mockNewsService);
       orchestrator.addBettingPlatform(mockBettingPlatform);
@@ -493,7 +502,9 @@ describe('OrchestratorServiceV2', () => {
     it('should not place real orders in dry run mode', async () => {
       config.dryRun = true;
       config.placeBets = true;
-      (AlertService as jest.MockedClass<typeof AlertService>).mockImplementation(() => mockAlertService);
+      (AlertService as jest.MockedClass<typeof AlertService>).mockImplementation(
+        () => mockAlertService,
+      );
       orchestrator = new OrchestratorServiceV2(config, alertConfig);
       orchestrator.addNewsService(mockNewsService);
       orchestrator.addBettingPlatform(mockBettingPlatform);
@@ -682,7 +693,7 @@ describe('OrchestratorServiceV2', () => {
       // Second cycle - same news should be skipped
       const parseNewsSpy = jest.spyOn(orchestrator['newsParser'], 'parseNews');
       await orchestrator['runCycle']();
-      
+
       // parseNews should not be called for already processed news
       expect(parseNewsSpy).not.toHaveBeenCalled();
     });

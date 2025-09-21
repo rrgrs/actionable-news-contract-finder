@@ -8,7 +8,16 @@ import {
   NewsServiceConfig,
   BettingPlatformConfig,
   LLMProviderConfig,
+  NewsService,
+  BettingPlatform,
+  LLMProvider,
 } from '../types';
+
+// Import registry types for proper typing
+type NewsRegistry = typeof import('../services/news/NewsServiceRegistry').NewsServiceRegistry;
+type BettingRegistry =
+  typeof import('../services/betting/BettingPlatformRegistry').BettingPlatformRegistry;
+type LLMRegistry = typeof import('../services/llm/LLMProviderRegistry').LLMProviderRegistry;
 
 export class ConfigLoader {
   private static parseServiceList(envVar: string | undefined): string[] {
@@ -103,8 +112,8 @@ export class ConfigLoader {
     return plugins;
   }
 
-  private static parseServiceConfig(serviceName: string, prefix: string): Record<string, any> {
-    const config: Record<string, any> = {};
+  private static parseServiceConfig(serviceName: string, prefix: string): Record<string, unknown> {
+    const config: Record<string, unknown> = {};
     const envPrefix = `${prefix}_${serviceName.toUpperCase().replace(/-/g, '_')}_`;
 
     // Collect all env vars that start with the service prefix
@@ -302,13 +311,13 @@ export class ConfigLoader {
 
   static async loadAndRegisterServices(
     config: AppConfig,
-    newsRegistry: any,
-    bettingRegistry: any,
-    llmRegistry: any,
+    newsRegistry: NewsRegistry,
+    bettingRegistry: BettingRegistry,
+    llmRegistry: LLMRegistry,
   ): Promise<{
-    newsServices: any[];
-    bettingPlatforms: any[];
-    llmProviders: any[];
+    newsServices: NewsService[];
+    bettingPlatforms: BettingPlatform[];
+    llmProviders: LLMProvider[];
   }> {
     const newsServices = [];
     const bettingPlatforms = [];
@@ -322,7 +331,10 @@ export class ConfigLoader {
       );
 
       newsRegistry.registerPlugin(serviceConfig.name, result.plugin);
-      const service = await newsRegistry.createService(serviceConfig.config as NewsServiceConfig);
+      const service = await newsRegistry.createService({
+        name: serviceConfig.name,
+        ...serviceConfig.config,
+      } as NewsServiceConfig);
       newsServices.push(service);
       console.log(`📰 Loaded news service: ${serviceConfig.name} (${result.exportName})`);
     }
@@ -335,9 +347,10 @@ export class ConfigLoader {
       );
 
       bettingRegistry.registerPlugin(platformConfig.name, result.plugin);
-      const platform = await bettingRegistry.createPlatform(
-        platformConfig.config as BettingPlatformConfig,
-      );
+      const platform = await bettingRegistry.createPlatform({
+        name: platformConfig.name,
+        ...platformConfig.config,
+      } as BettingPlatformConfig);
       bettingPlatforms.push(platform);
       console.log(`🎲 Loaded betting platform: ${platformConfig.name} (${result.exportName})`);
     }
@@ -350,7 +363,10 @@ export class ConfigLoader {
       );
 
       llmRegistry.registerPlugin(providerConfig.name, result.plugin);
-      const provider = await llmRegistry.createProvider(providerConfig.config as LLMProviderConfig);
+      const provider = await llmRegistry.createProvider({
+        name: providerConfig.name,
+        ...providerConfig.config,
+      } as LLMProviderConfig);
       llmProviders.push(provider);
       console.log(`🤖 Loaded LLM provider: ${providerConfig.name} (${result.exportName})`);
     }

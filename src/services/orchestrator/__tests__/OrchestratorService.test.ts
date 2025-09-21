@@ -112,7 +112,9 @@ describe('OrchestratorService', () => {
     });
 
     it('should run cycle on interval', async () => {
-      const runCycleSpy = jest.spyOn(orchestrator as any, 'runCycle').mockResolvedValue({});
+      const runCycleSpy = jest
+        .spyOn(orchestrator as unknown as { runCycle: () => Promise<void> }, 'runCycle')
+        .mockResolvedValue();
 
       await orchestrator.start();
 
