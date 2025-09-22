@@ -262,14 +262,27 @@ describe('NewsParserService', () => {
         title: `News Item ${i + 1}`,
       }));
 
+      // Mock batch response - returns an array
+      const mockBatchResponse = newsItems.map((item) => ({
+        ...mockLLMResponse,
+        newsId: item.id,
+        summary: `Summary for ${item.title}`,
+      }));
+
+      mockLLMProvider.generateCompletion = jest
+        .fn()
+        .mockResolvedValueOnce(JSON.stringify(mockBatchResponse.slice(0, 5))) // First batch
+        .mockResolvedValueOnce(JSON.stringify(mockBatchResponse.slice(5, 10))) // Second batch
+        .mockResolvedValueOnce(JSON.stringify(mockBatchResponse.slice(10, 12))); // Third batch
+
       const results = await parser.batchParseNews(newsItems, mockLLMProvider);
 
       expect(results).toHaveLength(12);
       expect(results[0].originalNewsId).toBe('news-1');
       expect(results[11].originalNewsId).toBe('news-12');
 
-      // Should process in batches of 5
-      expect(mockLLMProvider.generateCompletion).toHaveBeenCalledTimes(12);
+      // Should process in batches of 5 (12 items = 3 batches)
+      expect(mockLLMProvider.generateCompletion).toHaveBeenCalledTimes(3);
     });
 
     it('should handle empty array', async () => {

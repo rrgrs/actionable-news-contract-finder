@@ -170,7 +170,7 @@ describe('ContractValidatorService', () => {
     it('should identify opportunities', async () => {
       const underpricedContract = {
         ...testContract,
-        currentPrice: 0.25,
+        yesPrice: 0.25, // Changed from currentPrice to yesPrice
       };
 
       const result = await validator.validateContract(

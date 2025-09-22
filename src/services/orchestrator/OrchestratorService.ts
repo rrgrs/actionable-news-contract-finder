@@ -340,31 +340,51 @@ export class OrchestratorService {
   }
 
   private async parseNewsForInsights(newsItems: NewsItem[]): Promise<ParsedNewsInsight[]> {
-    const insights: ParsedNewsInsight[] = [];
-
-    for (const news of newsItems) {
-      try {
-        if (!this.llmProviders[0]) {
-          console.error('No LLM provider available');
-          continue;
-        }
-
-        const insight = await this.newsParser.parseNews(news, this.llmProviders[0]);
-
-        // Only keep insights that have actionable trading suggestions
-        if (
-          insight.suggestedActions.some(
-            (a) => a.type === 'bet' && a.confidence >= this.config.minRelevanceScore,
-          )
-        ) {
-          insights.push(insight);
-        }
-      } catch (error) {
-        console.error(`Failed to parse news item "${news.title}":`, error);
-      }
+    if (!this.llmProviders[0]) {
+      console.error('No LLM provider available');
+      return [];
     }
 
-    return insights;
+    try {
+      // Use batch processing to reduce API calls
+      console.log(`  Using batched processing for ${newsItems.length} news items...`);
+      const allInsights = await this.newsParser.batchParseNews(newsItems, this.llmProviders[0]);
+
+      // Filter for actionable insights only
+      const actionableInsights = allInsights.filter((insight) =>
+        insight.suggestedActions.some(
+          (a) => a.type === 'bet' && a.confidence >= this.config.minRelevanceScore,
+        ),
+      );
+
+      console.log(
+        `    Batch processing complete: ${actionableInsights.length} actionable insights from ${allInsights.length} total`,
+      );
+      return actionableInsights;
+    } catch (error) {
+      console.error('Batch processing failed, falling back to individual processing:', error);
+
+      // Fallback to individual processing
+      const insights: ParsedNewsInsight[] = [];
+      for (const news of newsItems) {
+        try {
+          const insight = await this.newsParser.parseNews(news, this.llmProviders[0]);
+
+          // Only keep insights that have actionable trading suggestions
+          if (
+            insight.suggestedActions.some(
+              (a) => a.type === 'bet' && a.confidence >= this.config.minRelevanceScore,
+            )
+          ) {
+            insights.push(insight);
+          }
+        } catch (error) {
+          console.error(`Failed to parse news item "${news.title}":`, error);
+        }
+      }
+
+      return insights;
+    }
   }
 
   private calculateOrderQuantity(validation: ContractValidation, _contract: Contract): number {
