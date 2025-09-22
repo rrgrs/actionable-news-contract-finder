@@ -155,7 +155,7 @@ export class GDELTNewsService implements NewsService {
     try {
       const response = await axios.get<GDELTResponse>(`${this.baseUrl}/doc/doc`, {
         params,
-        timeout: 15000,
+        timeout: 30000, // Increased timeout to 30 seconds for GDELT API
       });
 
       if (response.data.status === 'error') {

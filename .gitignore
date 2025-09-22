@@ -11,3 +11,9 @@ coverage/
 
 # Security - Private keys
 *.pem
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+data/

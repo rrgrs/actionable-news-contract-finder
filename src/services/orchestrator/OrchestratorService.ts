@@ -13,6 +13,7 @@ import { NewsParserService } from '../analysis/NewsParserService';
 import { ContractValidatorService } from '../analysis/ContractValidatorService';
 import { AlertService, AlertPayload } from '../alerts/AlertService';
 import { AlertConfig } from '../../config/types';
+import { PersistenceService } from '../persistence/PersistenceService';
 
 export interface OrchestratorConfig {
   pollIntervalMs: number;
@@ -39,6 +40,7 @@ export class OrchestratorService {
   private newsParser: NewsParserService;
   private contractValidator: ContractValidatorService;
   private alertService?: AlertService;
+  private persistenceService: PersistenceService;
   private activePositions: Map<string, Position[]> = new Map();
 
   constructor(
@@ -47,9 +49,11 @@ export class OrchestratorService {
     private bettingPlatforms: BettingPlatform[],
     private llmProviders: LLMProvider[],
     alertConfig?: AlertConfig,
+    persistenceDbPath?: string,
   ) {
     this.newsParser = new NewsParserService();
     this.contractValidator = new ContractValidatorService();
+    this.persistenceService = new PersistenceService(persistenceDbPath);
 
     if (alertConfig) {
       this.alertService = new AlertService(alertConfig);
@@ -62,6 +66,15 @@ export class OrchestratorService {
       return;
     }
 
+    // Initialize persistence service
+    await this.persistenceService.initialize();
+
+    // Display stats from previous runs
+    const stats = await this.persistenceService.getRecentStats(24);
+    console.log(
+      `📊 Last 24 hours: ${stats.newsProcessed} news processed, ${stats.insightsGenerated} insights generated`,
+    );
+
     this.isRunning = true;
     console.log('🚀 OrchestratorService started');
     console.log(`  Mode: ${this.config.dryRun ? 'DRY RUN' : 'LIVE'}`);
@@ -71,6 +84,7 @@ export class OrchestratorService {
     console.log(`  Betting platforms: ${this.bettingPlatforms.map((p) => p.name).join(', ')}`);
     console.log(`  LLM providers: ${this.llmProviders.map((p) => p.name).join(', ')}`);
     console.log(`  Alerts: ${this.alertService ? 'ENABLED' : 'DISABLED'}`);
+    console.log(`  Persistence: ENABLED (SQLite)`);
 
     // Process immediately
     await this.processLoop();
@@ -94,6 +108,9 @@ export class OrchestratorService {
       clearInterval(this.processInterval);
       this.processInterval = null;
     }
+
+    // Close database connection
+    await this.persistenceService.close();
 
     console.log('🛑 OrchestratorService stopped');
   }
@@ -167,13 +184,40 @@ export class OrchestratorService {
               result.marketsSearched += relevantContracts.length;
 
               if (relevantContracts.length > 0) {
-                const contracts = relevantContracts;
+                // Filter out contracts we've already validated for this news
+                const contractsToValidate: Contract[] = [];
+                for (const contract of relevantContracts) {
+                  const alreadyValidated = await this.persistenceService.isContractValidatedForNews(
+                    contract.id,
+                    insight.originalNewsId,
+                  );
+                  if (!alreadyValidated) {
+                    contractsToValidate.push(contract);
+                  }
+                }
+
+                if (contractsToValidate.length === 0) {
+                  console.log(`    ⏭️ All contracts already validated for this news item`);
+                  continue;
+                }
+
                 const contractValidations = await this.contractValidator.batchValidateContracts(
-                  contracts,
+                  contractsToValidate,
                   insight,
                   this.llmProviders[0],
                 );
                 result.contractsValidated += contractValidations.length;
+
+                // Mark contracts as validated in the database
+                for (const validation of contractValidations) {
+                  await this.persistenceService.markContractAsValidated(
+                    validation.contractId,
+                    platform.name,
+                    insight.originalNewsId,
+                    validation.relevanceScore,
+                    validation.suggestedPosition || 'hold',
+                  );
+                }
 
                 // Process validated contracts
                 for (const validation of contractValidations) {
@@ -182,7 +226,9 @@ export class OrchestratorService {
                     validation.suggestedConfidence >= this.config.minConfidenceScore &&
                     validation.suggestedPosition !== 'hold'
                   ) {
-                    const contract = contracts.find((c) => c.id === validation.contractId);
+                    const contract = contractsToValidate.find(
+                      (c) => c.id === validation.contractId,
+                    );
                     if (!contract) {
                       continue;
                     }
@@ -315,18 +361,36 @@ export class OrchestratorService {
   private async fetchAllNews(): Promise<NewsItem[]> {
     const allNews: NewsItem[] = [];
 
+    // Get already processed news IDs to avoid reprocessing
+    const processedNewsIds = await this.persistenceService.getProcessedNewsIds();
+    let skippedCount = 0;
+
     for (const service of this.newsServices) {
       try {
         const news = await service.fetchLatestNews();
-        allNews.push(...news);
+
+        // Filter out already processed news
+        const newNews = news.filter((item) => {
+          if (processedNewsIds.has(item.id)) {
+            skippedCount++;
+            return false;
+          }
+          return true;
+        });
+
+        allNews.push(...newNews);
       } catch (error) {
         console.error(`Failed to fetch news from ${service.name}:`, error);
       }
     }
 
-    // Deduplicate by title similarity
+    if (skippedCount > 0) {
+      console.log(`  ⏭️ Skipped ${skippedCount} already processed news items`);
+    }
+
+    // Deduplicate by title similarity within this batch
     const seen = new Set<string>();
-    return allNews.filter((item) => {
+    const deduplicatedNews = allNews.filter((item) => {
       const key = item.title
         .toLowerCase()
         .replace(/[^a-z0-9]/g, '')
@@ -337,6 +401,19 @@ export class OrchestratorService {
       seen.add(key);
       return true;
     });
+
+    // Mark all fetched news as processed (even if we don't generate insights for all)
+    for (const item of deduplicatedNews) {
+      await this.persistenceService.markNewsAsProcessed(
+        item.id,
+        item.title,
+        item.source,
+        item.url,
+        false, // insightGenerated will be updated later if needed
+      );
+    }
+
+    return deduplicatedNews;
   }
 
   private async parseNewsForInsights(newsItems: NewsItem[]): Promise<ParsedNewsInsight[]> {
@@ -360,6 +437,24 @@ export class OrchestratorService {
       console.log(
         `    Batch processing complete: ${actionableInsights.length} actionable insights from ${allInsights.length} total`,
       );
+
+      // Save insights to database and mark news as having insights generated
+      for (const insight of actionableInsights) {
+        await this.persistenceService.saveInsight(
+          insight.originalNewsId,
+          insight,
+          insight.relevanceScore,
+        );
+        // Update the news record to indicate an insight was generated
+        await this.persistenceService.markNewsAsProcessed(
+          insight.originalNewsId,
+          '', // title already saved
+          '', // source already saved
+          undefined,
+          true, // insightGenerated = true
+        );
+      }
+
       return actionableInsights;
     } catch (error) {
       console.error('Batch processing failed, falling back to individual processing:', error);
