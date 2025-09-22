@@ -42,6 +42,8 @@ interface GroqCompletionResponse {
 type GroqModelKey =
   | 'llama3-70b-8192'
   | 'llama3-8b-8192'
+  | 'llama-3.3-70b-versatile'
+  | 'llama-3.2-90b-text-preview'
   | 'mixtral-8x7b-32768'
   | 'gemma-7b-it'
   | 'gemma2-9b-it';
@@ -61,6 +63,8 @@ export class GroqLLMProvider implements LLMProvider {
   private readonly availableModels: Record<GroqModelKey, string> = {
     'llama3-70b-8192': 'Meta Llama 3 70B (8K context)',
     'llama3-8b-8192': 'Meta Llama 3 8B (8K context)',
+    'llama-3.3-70b-versatile': 'Meta Llama 3.3 70B Versatile',
+    'llama-3.2-90b-text-preview': 'Meta Llama 3.2 90B Text Preview',
     'mixtral-8x7b-32768': 'Mixtral 8x7B (32K context)',
     'gemma-7b-it': 'Google Gemma 7B Instruct',
     'gemma2-9b-it': 'Google Gemma 2 9B Instruct',
