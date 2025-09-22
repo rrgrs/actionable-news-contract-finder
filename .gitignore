@@ -8,3 +8,6 @@ coverage/
 .vscode/
 .idea/
 .claude/
+
+# Security - Private keys
+*.pem

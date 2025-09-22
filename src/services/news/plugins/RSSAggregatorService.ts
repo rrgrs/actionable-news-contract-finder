@@ -27,45 +27,57 @@ export class RSSAggregatorService implements NewsService {
   // private dedupTimeWindowMs = 3600000; // 1 hour - unused
   private lastFetchTime: Map<string, Date> = new Map();
 
-  // Default high-quality news feeds
+  // Default high-quality news feeds with working URLs
   private readonly defaultFeeds: RSSFeed[] = [
     {
-      name: 'Reuters Top News',
-      url: 'https://feeds.reuters.com/reuters/topNews',
-      category: 'general',
+      name: 'BBC World',
+      url: 'https://feeds.bbci.co.uk/news/world/rss.xml',
+      category: 'world',
     },
     {
-      name: 'Reuters Business',
-      url: 'https://feeds.reuters.com/reuters/businessNews',
+      name: 'BBC Business',
+      url: 'https://feeds.bbci.co.uk/news/business/rss.xml',
       category: 'business',
     },
-    {
-      name: 'Reuters Markets',
-      url: 'https://feeds.reuters.com/reuters/marketNews',
-      category: 'markets',
-    },
-    {
-      name: 'Bloomberg Markets',
-      url: 'https://feeds.bloomberg.com/markets/news.rss',
-      category: 'markets',
-    },
-    { name: 'AP Top News', url: 'https://feeds.apnews.com/rss/apf-topnews', category: 'general' },
-    { name: 'BBC World', url: 'http://feeds.bbci.co.uk/news/world/rss.xml', category: 'world' },
     {
       name: 'CNN Top Stories',
       url: 'http://rss.cnn.com/rss/cnn_topstories.rss',
       category: 'general',
     },
-    { name: 'Financial Times', url: 'https://www.ft.com/?format=rss', category: 'finance' },
     {
-      name: 'WSJ Markets',
-      url: 'https://feeds.a.dj.com/rss/RSSMarketsMain.xml',
+      name: 'CNN Money',
+      url: 'http://rss.cnn.com/rss/money_latest.rss',
       category: 'markets',
     },
     {
-      name: 'CNBC Top News',
-      url: 'https://www.cnbc.com/id/100003114/device/rss/rss.html',
+      name: 'TechCrunch',
+      url: 'https://techcrunch.com/feed/',
+      category: 'technology',
+    },
+    {
+      name: 'The Guardian World',
+      url: 'https://www.theguardian.com/world/rss',
+      category: 'world',
+    },
+    {
+      name: 'The Guardian Business',
+      url: 'https://www.theguardian.com/business/rss',
       category: 'business',
+    },
+    {
+      name: 'Yahoo Finance',
+      url: 'https://finance.yahoo.com/news/rssindex',
+      category: 'finance',
+    },
+    {
+      name: 'MarketWatch',
+      url: 'http://feeds.marketwatch.com/marketwatch/topstories/',
+      category: 'markets',
+    },
+    {
+      name: 'Seeking Alpha',
+      url: 'https://seekingalpha.com/feed.xml',
+      category: 'markets',
     },
   ];
 

@@ -53,11 +53,13 @@ export class GroqLLMProvider implements LLMProvider {
   private apiKey: string = '';
   private baseUrl = 'https://api.groq.com/openai/v1';
   private client!: AxiosInstance;
-  private model: string = 'llama3-70b-8192'; // Default to Llama 3 70B
+  private model: string = 'llama-3.3-70b-versatile'; // Default to Llama 3.3 70B Versatile
   private temperature: number = 0.7;
   private maxTokens: number = 4096;
-  private requestCount = 0;
   private lastRequestTime = Date.now();
+  private requestTimes: number[] = []; // Track request times for sliding window
+  private rpmLimit = 10; // Be very conservative: 10 requests per minute (free tier is ~30)
+  private requestDelayMs = 6000; // Minimum 6 seconds between requests
 
   // Available Groq models (as of 2024)
   private readonly availableModels: Record<GroqModelKey, string> = {
@@ -104,6 +106,15 @@ export class GroqLLMProvider implements LLMProvider {
       this.maxTokens = Math.max(1, Math.min(8192, Number(customConfig.maxTokens)));
     }
 
+    // Configure rate limiting
+    if (customConfig?.rpmLimit !== undefined) {
+      this.rpmLimit = Math.max(1, Math.min(30, Number(customConfig.rpmLimit)));
+    }
+
+    if (customConfig?.requestDelayMs !== undefined) {
+      this.requestDelayMs = Math.max(1000, Number(customConfig.requestDelayMs));
+    }
+
     // Initialize HTTP client
     this.client = axios.create({
       baseURL: this.baseUrl,
@@ -117,6 +128,9 @@ export class GroqLLMProvider implements LLMProvider {
     console.log(`Groq LLM Provider initialized with model: ${this.model}`);
     console.log(`Model description: ${this.availableModels[this.model as GroqModelKey]}`);
     console.log(`Temperature: ${this.temperature}, Max Tokens: ${this.maxTokens}`);
+    console.log(
+      `Rate Limiting: ${this.rpmLimit} requests/minute, ${this.requestDelayMs}ms min delay`,
+    );
   }
 
   async generateCompletion(prompt: string, systemPrompt?: string): Promise<string> {
@@ -225,28 +239,48 @@ Remember to respond ONLY with valid JSON, no additional text.`;
   }
 
   private async enforceRateLimit(): Promise<void> {
-    // Groq free tier: 30 requests per minute, 14,400 per day
     const now = Date.now();
-    const timeSinceLastRequest = now - this.lastRequestTime;
 
-    // If we've made a request in the last 2 seconds, wait
-    if (timeSinceLastRequest < 2000) {
-      await new Promise((resolve) => setTimeout(resolve, 2000 - timeSinceLastRequest));
+    // Clean up request times older than 1 minute
+    this.requestTimes = this.requestTimes.filter((time) => now - time < 60000);
+
+    // Check if we're at the rate limit
+    if (this.requestTimes.length >= this.rpmLimit) {
+      // Find the oldest request in the window
+      const oldestRequest = Math.min(...this.requestTimes);
+      const waitTime = 60000 - (now - oldestRequest) + 1000; // Add 1 second buffer
+
+      if (waitTime > 0) {
+        console.log(
+          `⏱️ Groq rate limit: ${this.requestTimes.length}/${this.rpmLimit} requests in last minute. ` +
+            `Waiting ${Math.ceil(waitTime / 1000)}s...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, waitTime));
+
+        // Clean up again after waiting
+        const afterWait = Date.now();
+        this.requestTimes = this.requestTimes.filter((time) => afterWait - time < 60000);
+      }
     }
 
-    this.requestCount++;
-    this.lastRequestTime = Date.now();
+    // Enforce minimum delay between requests
+    const timeSinceLastRequest = now - this.lastRequestTime;
+    if (timeSinceLastRequest < this.requestDelayMs) {
+      const delayTime = this.requestDelayMs - timeSinceLastRequest;
+      console.log(`⏳ Groq request throttling: waiting ${Math.ceil(delayTime / 1000)}s...`);
+      await new Promise((resolve) => setTimeout(resolve, delayTime));
+    }
 
-    // Reset counter every minute
-    if (this.requestCount >= 30) {
-      const minuteElapsed = Date.now() - (this.lastRequestTime - 60000);
-      if (minuteElapsed < 60000) {
-        console.log(
-          `Rate limit approaching, waiting ${Math.ceil((60000 - minuteElapsed) / 1000)}s...`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, 60000 - minuteElapsed));
-      }
-      this.requestCount = 0;
+    // Record this request
+    const requestTime = Date.now();
+    this.requestTimes.push(requestTime);
+    this.lastRequestTime = requestTime;
+
+    // Log current rate
+    if (this.requestTimes.length % 5 === 0) {
+      console.log(
+        `📊 Groq API usage: ${this.requestTimes.length}/${this.rpmLimit} requests in last minute`,
+      );
     }
   }
 

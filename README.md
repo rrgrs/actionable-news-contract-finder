@@ -87,6 +87,189 @@ cp .env.example .env
 # Edit .env with your configuration
 ```
 
+## Platform Setup Guide
+
+This section provides detailed setup instructions for all available news sources, betting platforms, and LLM providers.
+
+### News Services Setup
+
+#### Reddit News Service (FREE - No API key needed)
+```bash
+NEWS_SERVICES=reddit-news
+NEWS_REDDIT_NEWS_SUBREDDITS=worldnews,news,economics,finance,stocks,cryptocurrency
+NEWS_REDDIT_NEWS_MIN_SCORE=10
+NEWS_REDDIT_NEWS_SORT_BY=hot  # Options: hot, new, top
+```
+
+#### RSS Aggregator Service (FREE)
+```bash
+NEWS_SERVICES=rss-aggregator
+NEWS_RSS_AGGREGATOR_MAX_ITEMS_PER_FEED=20
+# Uses default feeds: BBC, CNN, Guardian, Yahoo Finance, MarketWatch, etc.
+# Or specify custom feeds:
+NEWS_RSS_AGGREGATOR_FEEDS=https://example.com/rss,https://another.com/feed
+```
+
+#### GDELT News Service (FREE - Global news monitoring)
+```bash
+NEWS_SERVICES=gdelt-news
+NEWS_GDELT_NEWS_MAX_RECORDS=250
+NEWS_GDELT_NEWS_LANGUAGES=english
+NEWS_GDELT_NEWS_THEMES=ECON_STOCKMARKET,ECON_INTEREST_RATE,TAX_FNCACT
+NEWS_GDELT_NEWS_COUNTRIES=US,GB,EU,CN
+```
+
+#### Finnhub Financial News (FREE tier available)
+```bash
+NEWS_SERVICES=finnhub-news
+NEWS_FINNHUB_NEWS_APIKEY=demo  # Use 'demo' for free tier
+# Or get your free API key at: https://finnhub.io/register
+NEWS_FINNHUB_NEWS_SYMBOLS=AAPL,GOOGL,MSFT,SPY,BTC-USD
+NEWS_FINNHUB_NEWS_CATEGORIES=general,forex,crypto,merger
+```
+
+#### Twitter/X News Service
+```bash
+NEWS_SERVICES=twitter-news
+# Get Bearer Token from: https://developer.twitter.com/en/portal/projects
+TWITTER_BEARER_TOKEN=your_bearer_token_here
+NEWS_TWITTER_NEWS_ACCOUNTS=Reuters,Bloomberg,BBCBreaking
+NEWS_TWITTER_NEWS_MAX_TWEETS=10
+NEWS_TWITTER_NEWS_MIN_ENGAGEMENT=10
+```
+
+### Betting Platform Setup
+
+#### Kalshi (US Regulated Prediction Market)
+1. **Create Account**: Sign up at https://kalshi.com
+2. **Generate API Credentials**:
+   - Go to Account Settings → API Keys
+   - Create new API key and download the private key file
+3. **Configure**:
+```bash
+BETTING_PLATFORMS=kalshi
+KALSHI_API_KEY_ID=your-api-key-id
+KALSHI_PRIVATE_KEY_PATH=./kalshi-private-key.pem
+KALSHI_DEMO_MODE=true  # Use demo mode for testing
+```
+
+#### Polymarket (Decentralized Prediction Market)
+1. **Create Account**: Sign up at https://polymarket.com
+2. **For Monitoring Only** (No API key needed):
+```bash
+BETTING_PLATFORMS=polymarket
+POLYMARKET_API_KEY=public
+POLYMARKET_API_SECRET=public
+POLYMARKET_PRIVATE_KEY=  # Leave empty for read-only mode
+```
+3. **For Trading** (Advanced):
+   - Requires Ethereum wallet and USDC
+   - Contact Polymarket for API access
+
+### LLM Provider Setup
+
+#### Groq (FREE - Fast inference)
+1. **Get API Key**: Sign up at https://console.groq.com/keys
+2. **Configure**:
+```bash
+LLM_PROVIDERS=groq
+GROQ_API_KEY=your-groq-api-key
+LLM_GROQ_MODEL=llama-3.3-70b-versatile
+LLM_GROQ_TEMPERATURE=0.7
+LLM_GROQ_MAXTOKENS=4096
+# Rate limiting (to avoid 429 errors on free tier)
+LLM_GROQ_RPMLIMIT=10
+LLM_GROQ_REQUESTDELAYMS=6000
+```
+
+#### OpenAI
+1. **Get API Key**: Sign up at https://platform.openai.com/api-keys
+2. **Configure**:
+```bash
+LLM_PROVIDERS=openai
+OPENAI_API_KEY=your-openai-api-key
+LLM_OPENAI_MODEL=gpt-4-turbo-preview
+LLM_OPENAI_TEMPERATURE=0.7
+LLM_OPENAI_MAX_TOKENS=2000
+```
+
+#### Anthropic Claude
+1. **Get API Key**: Sign up at https://console.anthropic.com
+2. **Configure**:
+```bash
+LLM_PROVIDERS=anthropic
+ANTHROPIC_API_KEY=your-anthropic-api-key
+LLM_ANTHROPIC_MODEL=claude-3-opus-20240229
+LLM_ANTHROPIC_TEMPERATURE=0.7
+LLM_ANTHROPIC_MAX_TOKENS=4000
+```
+
+### Complete Example Configuration
+
+Here's a complete `.env` file with multiple services configured:
+
+```bash
+# Core Settings
+POLL_INTERVAL_MS=60000
+MIN_RELEVANCE_SCORE=0.5
+MIN_CONFIDENCE_SCORE=0.6
+MAX_POSITIONS_PER_CONTRACT=3
+DRY_RUN=true  # Always start with dry run!
+PLACE_BETS=false
+LOG_LEVEL=info
+
+# News Services (multiple sources)
+NEWS_SERVICES=reddit-news,rss-aggregator,finnhub-news
+
+# Reddit Configuration
+NEWS_REDDIT_NEWS_SUBREDDITS=worldnews,economics,stocks
+NEWS_REDDIT_NEWS_MIN_SCORE=10
+
+# RSS Configuration
+NEWS_RSS_AGGREGATOR_MAX_ITEMS_PER_FEED=20
+
+# Finnhub Configuration
+NEWS_FINNHUB_NEWS_APIKEY=demo
+NEWS_FINNHUB_NEWS_SYMBOLS=AAPL,MSFT,SPY
+
+# Betting Platform
+BETTING_PLATFORMS=kalshi
+KALSHI_API_KEY_ID=your-key-id
+KALSHI_PRIVATE_KEY_PATH=./kalshi-private-key.pem
+KALSHI_DEMO_MODE=true
+
+# LLM Provider (Groq - free and fast)
+LLM_PROVIDERS=groq
+GROQ_API_KEY=your-groq-key
+LLM_GROQ_MODEL=llama-3.3-70b-versatile
+LLM_GROQ_RPMLIMIT=10
+LLM_GROQ_REQUESTDELAYMS=6000
+
+# Alerts
+ALERT_TYPE=system
+ALERT_MIN_CONFIDENCE=0.7
+ALERT_COOLDOWN_MINUTES=30
+```
+
+### Service-Specific Notes
+
+#### Free Services (No API Key Required)
+- **Reddit News**: Uses public Reddit API
+- **RSS Aggregator**: Parses public RSS feeds
+- **GDELT**: Public news database
+- **Finnhub**: Offers 'demo' key for testing
+- **Polymarket**: Read-only mode requires no authentication
+
+#### Services Requiring API Keys
+- **Twitter/X**: Requires developer account and Bearer token
+- **Kalshi**: Requires account and API credentials
+- **All LLM Providers**: Require API keys (Groq offers generous free tier)
+
+#### Rate Limiting Considerations
+- **Groq Free Tier**: ~30 requests/minute - configure conservatively
+- **Twitter API**: Limited requests - reduce accounts and tweet count
+- **Reddit**: Public API has rate limits - don't poll too frequently
+
 ## Configuration
 
 ### Environment Variables

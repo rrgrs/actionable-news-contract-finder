@@ -55,8 +55,12 @@ export class TwitterNewsService implements NewsService {
   private processedTweetIds = new Set<string>();
   private followedAccounts: string[] = [];
   private searchKeywords: string[] = [];
-  private maxResults = 25;
+  private maxResults = 10; // Reduced to minimize API calls
   private minEngagement = 10; // Minimum likes + retweets
+  private lastApiCallTime = 0;
+  private apiCallDelayMs = 5000; // 5 second delay between API calls
+  private rateLimitRemaining = 15; // Twitter v2 rate limit
+  private rateLimitReset = 0;
 
   // Default news accounts to follow
   private readonly defaultAccounts = [
@@ -144,6 +148,18 @@ export class TwitterNewsService implements NewsService {
       return this.getMockNews();
     }
 
+    // Rate limiting check
+    if (this.rateLimitRemaining <= 1) {
+      const now = Date.now();
+      if (now < this.rateLimitReset) {
+        const waitTime = Math.ceil((this.rateLimitReset - now) / 1000);
+        console.log(`Twitter rate limit reached. Waiting ${waitTime} seconds...`);
+        return [];
+      }
+      // Reset rate limit
+      this.rateLimitRemaining = 15;
+    }
+
     const allNews: NewsItem[] = [];
 
     // Fetch tweets from followed accounts
@@ -179,12 +195,18 @@ export class TwitterNewsService implements NewsService {
 
   private async fetchUserTweets(username: string): Promise<NewsItem[]> {
     try {
+      // Apply rate limiting delay
+      await this.enforceRateLimit();
+
       // First, get the user ID
       const userId = await this.getUserId(username);
       if (!userId) {
         console.warn(`Could not find user ID for @${username}`);
         return [];
       }
+
+      // Apply rate limiting delay again before fetching tweets
+      await this.enforceRateLimit();
 
       // Fetch recent tweets
       const url = `${this.baseUrl}/users/${userId}/tweets`;
@@ -199,10 +221,14 @@ export class TwitterNewsService implements NewsService {
         },
       });
 
+      // Update rate limit from headers
+      this.updateRateLimitFromHeaders(response.headers);
+
       return this.transformTweets(response.data.data || [], username);
     } catch (error) {
       if (axios.isAxiosError(error) && error.response?.status === 429) {
         console.warn(`Rate limited when fetching @${username}`);
+        this.handleRateLimit(error.response.headers);
       }
       return [];
     }
@@ -210,6 +236,9 @@ export class TwitterNewsService implements NewsService {
 
   private async searchTweets(): Promise<NewsItem[]> {
     try {
+      // Apply rate limiting delay
+      await this.enforceRateLimit();
+
       // Build search query
       const query = this.buildSearchQuery();
 
@@ -485,6 +514,37 @@ export class TwitterNewsService implements NewsService {
         importance: 'high',
       },
     }));
+  }
+
+  private async enforceRateLimit(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastCall = now - this.lastApiCallTime;
+
+    if (timeSinceLastCall < this.apiCallDelayMs) {
+      const waitTime = this.apiCallDelayMs - timeSinceLastCall;
+      console.log(`Twitter API rate limiting: waiting ${waitTime}ms`);
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+    }
+
+    this.lastApiCallTime = Date.now();
+  }
+
+  private updateRateLimitFromHeaders(headers: Record<string, unknown>): void {
+    const remaining = headers['x-rate-limit-remaining'];
+    const reset = headers['x-rate-limit-reset'];
+
+    if (remaining !== undefined) {
+      this.rateLimitRemaining = parseInt(String(remaining));
+    }
+    if (reset !== undefined) {
+      this.rateLimitReset = parseInt(String(reset)) * 1000;
+    }
+  }
+
+  private handleRateLimit(headers: Record<string, unknown>): void {
+    this.updateRateLimitFromHeaders(headers);
+    this.rateLimitRemaining = 0;
+    console.log(`Twitter rate limit hit. Reset at ${new Date(this.rateLimitReset).toISOString()}`);
   }
 
   async isHealthy(): Promise<boolean> {

@@ -1,4 +1,6 @@
 import axios, { AxiosInstance } from 'axios';
+import * as fs from 'fs';
+import * as jwt from 'jsonwebtoken';
 import {
   BettingPlatform,
   BettingPlatformConfig,
@@ -9,11 +11,6 @@ import {
   Position,
   MarketResolution,
 } from '../../../types';
-
-interface KalshiAuth {
-  token: string;
-  member_id: string;
-}
 
 interface KalshiMarket {
   ticker: string;
@@ -103,36 +100,38 @@ interface KalshiOrderRequest {
 
 export class KalshiPlatform implements BettingPlatform {
   name = 'kalshi';
-  private apiKey: string = '';
-  private apiSecret: string = '';
-  private baseUrl: string = 'https://trading-api.kalshi.com/trade-api/v2';
+  private apiKeyId: string = '';
+  private privateKey: string = '';
+  private baseUrl: string = 'https://demo-api.kalshi.co/trade-api/v2'; // Demo is currently the only working endpoint
   private demoUrl: string = 'https://demo-api.kalshi.co/trade-api/v2';
   private client!: AxiosInstance;
-  private auth: KalshiAuth | null = null;
-  private isDemoMode = false;
-  private authExpiry: Date | null = null;
+  private isDemoMode = true; // Default to demo since production endpoints are not accessible
 
   async initialize(config: BettingPlatformConfig): Promise<void> {
     const customConfig = config.customConfig as Record<string, unknown> | undefined;
 
-    // Get API credentials
-    this.apiKey =
-      config.apiKey || (customConfig?.apiKey as string) || process.env.KALSHI_API_KEY || '';
-    this.apiSecret =
-      config.apiSecret ||
-      (customConfig?.apiSecret as string) ||
-      process.env.KALSHI_API_SECRET ||
-      '';
+    // Get API Key ID
+    this.apiKeyId = (customConfig?.apiKeyId as string) || process.env.KALSHI_API_KEY_ID || '';
+
+    // Get Private Key Path and read the key
+    const privateKeyPath =
+      (customConfig?.privateKeyPath as string) || process.env.KALSHI_PRIVATE_KEY_PATH || '';
+
+    if (!this.apiKeyId || !privateKeyPath) {
+      throw new Error(
+        'Kalshi API credentials not provided. Set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH in .env.',
+      );
+    }
+
+    // Read private key from file
+    try {
+      this.privateKey = fs.readFileSync(privateKeyPath, 'utf-8');
+    } catch (error) {
+      throw new Error(`Failed to read Kalshi private key from ${privateKeyPath}: ${error}`);
+    }
 
     // Check for demo mode
     this.isDemoMode = customConfig?.demoMode === true || process.env.KALSHI_DEMO_MODE === 'true';
-
-    if (!this.apiKey || !this.apiSecret) {
-      throw new Error(
-        'Kalshi API credentials not provided. Set KALSHI_API_KEY and KALSHI_API_SECRET in .env. ' +
-          'Register at https://kalshi.com and get API credentials from your account settings.',
-      );
-    }
 
     // Initialize HTTP client
     this.client = axios.create({
@@ -143,47 +142,35 @@ export class KalshiPlatform implements BettingPlatform {
       timeout: 15000,
     });
 
-    // Authenticate
-    await this.authenticate();
+    // Add request interceptor to sign requests
+    this.client.interceptors.request.use((config) => {
+      const token = this.generateJWT(config.method?.toUpperCase() || 'GET', config.url || '');
+      config.headers['Authorization'] = `Bearer ${token}`;
+      return config;
+    });
 
-    console.log(`Kalshi Platform initialized (${this.isDemoMode ? 'DEMO' : 'LIVE'} mode)`);
+    console.log(
+      `Kalshi Platform initialized with API key authentication (${this.isDemoMode ? 'DEMO' : 'LIVE'} mode)`,
+    );
   }
 
-  private async authenticate(): Promise<void> {
-    try {
-      const response = await this.client.post('/login', {
-        email: this.apiKey,
-        password: this.apiSecret,
-      });
+  private generateJWT(method: string, path: string): string {
+    const now = Math.floor(Date.now() / 1000);
 
-      this.auth = {
-        token: response.data.token,
-        member_id: response.data.member_id,
-      };
+    const payload = {
+      iss: this.apiKeyId,
+      sub: this.apiKeyId,
+      iat: now,
+      exp: now + 60, // Token expires in 60 seconds
+      method: method,
+      path: path,
+    };
 
-      // Set auth header for future requests
-      this.client.defaults.headers.common['Authorization'] = `Bearer ${this.auth.token}`;
-
-      // Token expires in 24 hours, refresh after 23 hours
-      this.authExpiry = new Date(Date.now() + 23 * 60 * 60 * 1000);
-
-      console.log('Kalshi authentication successful');
-    } catch (error) {
-      console.error('Kalshi authentication failed:', error);
-      throw new Error('Failed to authenticate with Kalshi API');
-    }
-  }
-
-  private async ensureAuthenticated(): Promise<void> {
-    if (!this.auth || !this.authExpiry || new Date() > this.authExpiry) {
-      await this.authenticate();
-    }
+    return jwt.sign(payload, this.privateKey, { algorithm: 'RS256' });
   }
 
   async getAvailableContracts(): Promise<Contract[]> {
     try {
-      await this.ensureAuthenticated();
-
       // Fetch all active events
       const response = await this.client.get('/events', {
         params: {
@@ -209,14 +196,15 @@ export class KalshiPlatform implements BettingPlatform {
       return contracts;
     } catch (error) {
       console.error('Failed to fetch Kalshi contracts:', error);
+      if (axios.isAxiosError(error) && error.response) {
+        console.error('Error response:', error.response.data);
+      }
       throw error;
     }
   }
 
   async getContract(contractId: string): Promise<Contract | null> {
     try {
-      await this.ensureAuthenticated();
-
       const response = await this.client.get(`/markets/${contractId}`);
       const market: KalshiMarket = response.data.market;
 
@@ -276,8 +264,6 @@ export class KalshiPlatform implements BettingPlatform {
 
   async placeOrder(order: Order): Promise<OrderStatus> {
     try {
-      await this.ensureAuthenticated();
-
       // Convert our Order to Kalshi format
       const kalshiOrder: KalshiOrderRequest = {
         ticker: order.contractId,
@@ -321,8 +307,6 @@ export class KalshiPlatform implements BettingPlatform {
 
   async cancelOrder(orderId: string): Promise<boolean> {
     try {
-      await this.ensureAuthenticated();
-
       await this.client.delete(`/portfolio/orders/${orderId}`);
       console.log(`Kalshi order ${orderId} cancelled`);
       return true;
@@ -334,8 +318,6 @@ export class KalshiPlatform implements BettingPlatform {
 
   async getPositions(): Promise<Position[]> {
     try {
-      await this.ensureAuthenticated();
-
       const response = await this.client.get('/portfolio/positions');
       const kalshiPositions: KalshiPosition[] = response.data.market_positions;
 
@@ -375,8 +357,6 @@ export class KalshiPlatform implements BettingPlatform {
 
   async getBalance(): Promise<number> {
     try {
-      await this.ensureAuthenticated();
-
       const response = await this.client.get('/portfolio/balance');
       return response.data.balance / 100; // Convert cents to dollars
     } catch (error) {
@@ -387,8 +367,6 @@ export class KalshiPlatform implements BettingPlatform {
 
   async getMarketResolution(contractId: string): Promise<MarketResolution | null> {
     try {
-      await this.ensureAuthenticated();
-
       const response = await this.client.get(`/markets/${contractId}`);
       const market: KalshiMarket = response.data.market;
 
@@ -425,7 +403,6 @@ export class KalshiPlatform implements BettingPlatform {
 
   async isHealthy(): Promise<boolean> {
     try {
-      await this.ensureAuthenticated();
       const response = await this.client.get('/exchange/status');
       return response.data.trading_active === true;
     } catch {
@@ -434,13 +411,6 @@ export class KalshiPlatform implements BettingPlatform {
   }
 
   async destroy(): Promise<void> {
-    if (this.auth) {
-      try {
-        await this.client.post('/logout');
-      } catch (error) {
-        console.error('Error during Kalshi logout:', error);
-      }
-    }
     console.log('Kalshi Platform destroyed');
   }
 }
