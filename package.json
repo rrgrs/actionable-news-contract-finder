@@ -47,6 +47,7 @@
     "nodemailer": "^7.0.6",
     "reflect-metadata": "^0.2.2",
     "sqlite3": "^5.1.7",
-    "typeorm": "^0.3.27"
+    "typeorm": "^0.3.27",
+    "winston": "^3.17.0"
   }
 }

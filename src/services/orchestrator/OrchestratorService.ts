@@ -14,6 +14,7 @@ import { ContractValidatorService } from '../analysis/ContractValidatorService';
 import { AlertService, AlertPayload } from '../alerts/AlertService';
 import { AlertConfig } from '../../config/types';
 import { PersistenceService } from '../persistence/PersistenceService';
+import { createLogger, logArticleProcessing, logContractValidation } from '../../utils/logger';
 
 export interface OrchestratorConfig {
   pollIntervalMs: number;
@@ -42,6 +43,7 @@ export class OrchestratorService {
   private alertService?: AlertService;
   private persistenceService: PersistenceService;
   private activePositions: Map<string, Position[]> = new Map();
+  private logger = createLogger('Orchestrator');
 
   constructor(
     private config: OrchestratorConfig,
@@ -62,7 +64,7 @@ export class OrchestratorService {
 
   async start(): Promise<void> {
     if (this.isRunning) {
-      console.log('OrchestratorService is already running');
+      this.logger.info('OrchestratorService is already running');
       return;
     }
 
@@ -71,20 +73,24 @@ export class OrchestratorService {
 
     // Display stats from previous runs
     const stats = await this.persistenceService.getRecentStats(24);
-    console.log(
-      `📊 Last 24 hours: ${stats.newsProcessed} news processed, ${stats.insightsGenerated} insights generated`,
-    );
+    this.logger.info('Service initialization complete', {
+      last24HoursStats: {
+        newsProcessed: stats.newsProcessed,
+        insightsGenerated: stats.insightsGenerated,
+      },
+    });
 
     this.isRunning = true;
-    console.log('🚀 OrchestratorService started');
-    console.log(`  Mode: ${this.config.dryRun ? 'DRY RUN' : 'LIVE'}`);
-    console.log(`  Bet Placement: ${this.config.placeBets ? 'ENABLED' : 'DISABLED'}`);
-    console.log(`  Poll interval: ${this.config.pollIntervalMs / 1000}s`);
-    console.log(`  News services: ${this.newsServices.map((s) => s.name).join(', ')}`);
-    console.log(`  Betting platforms: ${this.bettingPlatforms.map((p) => p.name).join(', ')}`);
-    console.log(`  LLM providers: ${this.llmProviders.map((p) => p.name).join(', ')}`);
-    console.log(`  Alerts: ${this.alertService ? 'ENABLED' : 'DISABLED'}`);
-    console.log(`  Persistence: ENABLED (SQLite)`);
+    this.logger.info('OrchestratorService started', {
+      mode: this.config.dryRun ? 'DRY RUN' : 'LIVE',
+      betPlacement: this.config.placeBets ? 'ENABLED' : 'DISABLED',
+      pollIntervalSeconds: this.config.pollIntervalMs / 1000,
+      newsServices: this.newsServices.map((s) => s.name),
+      bettingPlatforms: this.bettingPlatforms.map((p) => p.name),
+      llmProviders: this.llmProviders.map((p) => p.name),
+      alerts: this.alertService ? 'ENABLED' : 'DISABLED',
+      persistence: 'ENABLED (SQLite)',
+    });
 
     // Process immediately
     await this.processLoop();
@@ -92,14 +98,16 @@ export class OrchestratorService {
     // Then set up recurring interval
     this.processInterval = setInterval(() => {
       this.processLoop().catch((error) => {
-        console.error('Error in processing loop:', error);
+        this.logger.error('Error in processing loop', {
+          error: error instanceof Error ? error.message : String(error),
+        });
       });
     }, this.config.pollIntervalMs);
   }
 
   async stop(): Promise<void> {
     if (!this.isRunning) {
-      console.log('OrchestratorService is not running');
+      this.logger.info('OrchestratorService is not running');
       return;
     }
 
@@ -112,7 +120,7 @@ export class OrchestratorService {
     // Close database connection
     await this.persistenceService.close();
 
-    console.log('🛑 OrchestratorService stopped');
+    this.logger.info('OrchestratorService stopped');
   }
 
   private async processLoop(): Promise<ProcessingResult> {
@@ -127,29 +135,35 @@ export class OrchestratorService {
     };
 
     try {
-      console.log(`\n📰 Processing news at ${new Date().toISOString()}`);
+      this.logger.info('Starting news processing cycle', {
+        timestamp: new Date().toISOString(),
+      });
 
       // Step 1: Fetch news from all sources
       const allNews = await this.fetchAllNews();
       result.newsProcessed = allNews.length;
 
       if (allNews.length === 0) {
-        console.log('  No new news items found');
+        this.logger.info('No new news items found');
         return result;
       }
 
-      console.log(`  Found ${allNews.length} news items`);
+      this.logger.info('News fetching complete', {
+        newsItemsFound: allNews.length,
+      });
 
       // Step 2: Parse news for insights
       const insights = await this.parseNewsForInsights(allNews);
       result.insightsGenerated = insights.length;
 
       if (insights.length === 0) {
-        console.log('  No actionable insights generated');
+        this.logger.info('No actionable insights generated');
         return result;
       }
 
-      console.log(`  Generated ${insights.length} actionable insights`);
+      this.logger.info('Insight generation complete', {
+        actionableInsights: insights.length,
+      });
 
       // Step 3: Search for relevant contracts
       for (const insight of insights) {
@@ -197,7 +211,10 @@ export class OrchestratorService {
                 }
 
                 if (contractsToValidate.length === 0) {
-                  console.log(`    ⏭️ All contracts already validated for this news item`);
+                  this.logger.debug('All contracts already validated for this news item', {
+                    newsId: insight.originalNewsId,
+                    platform: platform.name,
+                  });
                   continue;
                 }
 
@@ -216,6 +233,17 @@ export class OrchestratorService {
                     insight.originalNewsId,
                     validation.relevanceScore,
                     validation.suggestedPosition || 'hold',
+                  );
+
+                  // Log the validation result using helper function
+                  logContractValidation(
+                    this.logger,
+                    validation.contractId,
+                    platform.name,
+                    insight.originalNewsId,
+                    validation.isRelevant,
+                    validation.suggestedPosition,
+                    validation.suggestedConfidence,
                   );
                 }
 
@@ -258,8 +286,16 @@ export class OrchestratorService {
                       try {
                         await this.alertService.sendAlert(alertPayload);
                         result.alertsSent++;
+                        this.logger.info('Alert sent successfully', {
+                          marketTitle: contract.title,
+                          suggestedPosition: validation.suggestedPosition,
+                          confidence: validation.suggestedConfidence,
+                        });
                       } catch (error) {
-                        console.error('Failed to send alert:', error);
+                        this.logger.error('Failed to send alert', {
+                          error: error instanceof Error ? error.message : String(error),
+                          marketTitle: contract.title,
+                        });
                         result.errors.push(`Alert failed: ${error}`);
                       }
                     }
@@ -270,19 +306,22 @@ export class OrchestratorService {
                       validation.suggestedPosition === 'buy' ? contract.yesPrice : contract.noPrice;
 
                     if (!this.config.placeBets) {
-                      console.log(
-                        `  📊 [BETS DISABLED] Found opportunity: ${validation.suggestedPosition} ${quantity} shares of "${contract.title}" at $${currentPrice}`,
-                      );
-                      console.log(`     Market: ${contract.title}`);
-                      console.log(
-                        `     Confidence: ${Math.round(validation.suggestedConfidence * 100)}%`,
-                      );
-                      console.log(`     Reasoning: ${validation.reasoning}`);
+                      this.logger.info('Trading opportunity found (bets disabled)', {
+                        action: validation.suggestedPosition,
+                        quantity,
+                        contractTitle: contract.title,
+                        currentPrice,
+                        confidence: Math.round(validation.suggestedConfidence * 100),
+                        reasoning: validation.reasoning,
+                      });
                       result.positionsCreated++; // Count as found opportunity
                     } else if (this.config.dryRun) {
-                      console.log(
-                        `  📝 [DRY RUN] Would place ${validation.suggestedPosition} order for ${quantity} shares at $${currentPrice}`,
-                      );
+                      this.logger.info('Dry run - would place order', {
+                        action: validation.suggestedPosition,
+                        quantity,
+                        currentPrice,
+                        contractTitle: contract.title,
+                      });
                       result.positionsCreated++;
                     } else {
                       try {
@@ -297,9 +336,13 @@ export class OrchestratorService {
 
                         const orderStatus = await platform.placeOrder(order);
 
-                        console.log(
-                          `  ✅ Placed ${validation.suggestedPosition} order for ${quantity} shares (Order ID: ${orderStatus.orderId})`,
-                        );
+                        this.logger.info('Order placed successfully', {
+                          action: validation.suggestedPosition,
+                          quantity,
+                          orderId: orderStatus.orderId,
+                          contractTitle: contract.title,
+                          platform: platform.name,
+                        });
                         result.positionsCreated++;
 
                         // Track order status
@@ -320,7 +363,12 @@ export class OrchestratorService {
                           this.activePositions.set(contract.id, positions);
                         }
                       } catch (error) {
-                        console.error(`  ❌ Failed to place order:`, error);
+                        this.logger.error('Failed to place order', {
+                          error: error instanceof Error ? error.message : String(error),
+                          contractTitle: contract.title,
+                          platform: platform.name,
+                          action: validation.suggestedPosition,
+                        });
                         result.errors.push(`Order placement failed: ${error}`);
                       }
                     }
@@ -328,7 +376,10 @@ export class OrchestratorService {
                 }
               }
             } catch (error) {
-              console.error(`Failed to search markets on ${platform.name}:`, error);
+              this.logger.error('Failed to search markets', {
+                platform: platform.name,
+                error: error instanceof Error ? error.message : String(error),
+              });
               result.errors.push(`Market search failed on ${platform.name}: ${error}`);
             }
           }
@@ -338,20 +389,27 @@ export class OrchestratorService {
       // Step 4: Monitor existing positions (if any)
       await this.monitorPositions();
 
-      console.log(`  ✅ Processing complete:
-    News processed: ${result.newsProcessed}
-    Insights generated: ${result.insightsGenerated}
-    Markets searched: ${result.marketsSearched}
-    Contracts validated: ${result.contractsValidated}
-    Positions created: ${result.positionsCreated}
-    Alerts sent: ${result.alertsSent}`);
+      this.logger.info('Processing cycle complete', {
+        newsProcessed: result.newsProcessed,
+        insightsGenerated: result.insightsGenerated,
+        marketsSearched: result.marketsSearched,
+        contractsValidated: result.contractsValidated,
+        positionsCreated: result.positionsCreated,
+        alertsSent: result.alertsSent,
+        errorsCount: result.errors.length,
+      });
 
       if (result.errors.length > 0) {
-        console.log(`  ⚠️ Errors encountered: ${result.errors.length}`);
-        result.errors.forEach((error) => console.log(`    - ${error}`));
+        this.logger.warn('Errors encountered during processing', {
+          errorCount: result.errors.length,
+          errors: result.errors,
+        });
       }
     } catch (error) {
-      console.error('Error in processing loop:', error);
+      this.logger.error('Error in processing loop', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
       result.errors.push(`Processing loop error: ${error}`);
     }
 
@@ -380,12 +438,17 @@ export class OrchestratorService {
 
         allNews.push(...newNews);
       } catch (error) {
-        console.error(`Failed to fetch news from ${service.name}:`, error);
+        this.logger.error('Failed to fetch news from service', {
+          serviceName: service.name,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 
     if (skippedCount > 0) {
-      console.log(`  ⏭️ Skipped ${skippedCount} already processed news items`);
+      this.logger.debug('Skipped already processed news items', {
+        skippedCount,
+      });
     }
 
     // Deduplicate by title similarity within this batch
@@ -418,13 +481,15 @@ export class OrchestratorService {
 
   private async parseNewsForInsights(newsItems: NewsItem[]): Promise<ParsedNewsInsight[]> {
     if (!this.llmProviders[0]) {
-      console.error('No LLM provider available');
+      this.logger.error('No LLM provider available');
       return [];
     }
 
     try {
       // Use batch processing to reduce API calls
-      console.log(`  Using batched processing for ${newsItems.length} news items...`);
+      this.logger.debug('Starting batch processing for news items', {
+        newsItemCount: newsItems.length,
+      });
       const allInsights = await this.newsParser.batchParseNews(newsItems, this.llmProviders[0]);
 
       // Filter for actionable insights only
@@ -434,9 +499,10 @@ export class OrchestratorService {
         ),
       );
 
-      console.log(
-        `    Batch processing complete: ${actionableInsights.length} actionable insights from ${allInsights.length} total`,
-      );
+      this.logger.info('Batch processing complete', {
+        actionableInsights: actionableInsights.length,
+        totalInsights: allInsights.length,
+      });
 
       // Save insights to database and mark news as having insights generated
       for (const insight of actionableInsights) {
@@ -453,11 +519,25 @@ export class OrchestratorService {
           undefined,
           true, // insightGenerated = true
         );
+
+        // Log each actionable insight using helper function
+        const newsItem = newsItems.find((n) => n.id === insight.originalNewsId);
+        if (newsItem) {
+          logArticleProcessing(
+            this.logger,
+            newsItem,
+            true, // actionable
+            `Generated ${insight.suggestedActions.length} trading actions`,
+            insight.relevanceScore,
+          );
+        }
       }
 
       return actionableInsights;
     } catch (error) {
-      console.error('Batch processing failed, falling back to individual processing:', error);
+      this.logger.warn('Batch processing failed, falling back to individual processing', {
+        error: error instanceof Error ? error.message : String(error),
+      });
 
       // Fallback to individual processing
       const insights: ParsedNewsInsight[] = [];
@@ -472,9 +552,27 @@ export class OrchestratorService {
             )
           ) {
             insights.push(insight);
+            logArticleProcessing(
+              this.logger,
+              news,
+              true, // actionable
+              `Generated ${insight.suggestedActions.length} trading actions`,
+              insight.relevanceScore,
+            );
+          } else {
+            logArticleProcessing(
+              this.logger,
+              news,
+              false, // not actionable
+              'No actionable trading suggestions above threshold',
+            );
           }
         } catch (error) {
-          console.error(`Failed to parse news item "${news.title}":`, error);
+          this.logger.error('Failed to parse news item', {
+            newsTitle: news.title,
+            newsId: news.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       }
 
@@ -494,7 +592,9 @@ export class OrchestratorService {
       return;
     }
 
-    console.log(`  📈 Monitoring ${this.activePositions.size} active positions`);
+    this.logger.debug('Monitoring active positions', {
+      activePositionsCount: this.activePositions.size,
+    });
 
     for (const [contractId, positions] of this.activePositions.entries()) {
       for (const position of positions) {
@@ -513,13 +613,20 @@ export class OrchestratorService {
           const pnl = (currentPrice - position.averagePrice) * position.quantity;
           const pnlPercent = ((currentPrice - position.averagePrice) / position.averagePrice) * 100;
 
-          console.log(
-            `    Position: ${position.quantity} ${position.side} @ ${position.averagePrice} | Current: ${currentPrice} | P&L: $${pnl.toFixed(
-              2,
-            )} (${pnlPercent.toFixed(1)}%)`,
-          );
+          this.logger.debug('Position update', {
+            contractId,
+            quantity: position.quantity,
+            side: position.side,
+            averagePrice: position.averagePrice,
+            currentPrice,
+            pnl: parseFloat(pnl.toFixed(2)),
+            pnlPercent: parseFloat(pnlPercent.toFixed(1)),
+          });
         } catch (error) {
-          console.error(`Failed to monitor position ${contractId}:`, error);
+          this.logger.error('Failed to monitor position', {
+            contractId,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       }
     }
@@ -537,7 +644,11 @@ export class OrchestratorService {
       const contracts = allContracts.filter((c) => c.id.includes(marketId));
       return contracts;
     } catch (error) {
-      console.error('Test contract failed:', error);
+      this.logger.error('Test contract failed', {
+        platformName,
+        marketId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return [];
     }
   }

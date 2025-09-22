@@ -12,7 +12,9 @@ An extensible TypeScript application that monitors news sources, analyzes them u
 - ✅ **Automated Trading**: Place orders automatically based on confidence thresholds
 - ✅ **Alert System**: Email and system notifications for high-confidence opportunities
 - ✅ **Dry Run Mode**: Test strategies without placing real orders
-- ✅ **Comprehensive Logging**: Track all activities and decisions
+- ✅ **Persistence Layer**: SQLite database prevents reprocessing of news across restarts
+- ✅ **Winston Logging**: Structured, leveled logging with human-readable console output
+- ✅ **Debug Mode**: Detailed article processing logs for debugging
 
 ## Architecture
 
@@ -305,8 +307,9 @@ MAX_POSITIONS_PER_CONTRACT=3        # Max positions per betting contract
 DRY_RUN=false                       # Test mode (no real orders)
 PLACE_BETS=true                     # Enable/disable actual bet placement
 
-# Logging
-LOG_LEVEL=info                      # Log level: debug, info, warn, error
+# Logging and Persistence
+LOG_LEVEL=info                      # Log level: error, warn, info, debug, verbose
+DB_PATH=./data/app.db               # SQLite database path for persisting processed news
 ```
 
 #### Service Configuration
