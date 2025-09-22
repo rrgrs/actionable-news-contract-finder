@@ -168,6 +168,25 @@ POLYMARKET_PRIVATE_KEY=  # Leave empty for read-only mode
 
 ### LLM Provider Setup
 
+#### Google Gemini (FREE - 60 requests/minute)
+1. **Get API Key**: Sign up at https://aistudio.google.com/app/apikey
+2. **Configure**:
+```bash
+LLM_PROVIDERS=gemini
+GEMINI_API_KEY=your-gemini-api-key
+LLM_GEMINI_MODEL=gemini-1.5-flash  # or gemini-1.5-pro
+LLM_GEMINI_TEMPERATURE=0.7
+LLM_GEMINI_MAXTOKENS=8192
+# Rate limiting (free tier: 60 requests/minute)
+LLM_GEMINI_RPMLIMIT=60
+LLM_GEMINI_REQUESTDELAYMS=1000
+```
+**Features**:
+- 60 requests per minute on free tier
+- 1 million token context window
+- Batch processing support (reduces API calls by 80%)
+- Automatic retry with exponential backoff
+
 #### Groq (FREE - Fast inference)
 1. **Get API Key**: Sign up at https://console.groq.com/keys
 2. **Configure**:
@@ -238,12 +257,12 @@ KALSHI_API_KEY_ID=your-key-id
 KALSHI_PRIVATE_KEY_PATH=./kalshi-private-key.pem
 KALSHI_DEMO_MODE=true
 
-# LLM Provider (Groq - free and fast)
-LLM_PROVIDERS=groq
-GROQ_API_KEY=your-groq-key
-LLM_GROQ_MODEL=llama-3.3-70b-versatile
-LLM_GROQ_RPMLIMIT=10
-LLM_GROQ_REQUESTDELAYMS=6000
+# LLM Provider (Gemini - best free tier with 60 RPM)
+LLM_PROVIDERS=gemini
+GEMINI_API_KEY=your-gemini-key
+LLM_GEMINI_MODEL=gemini-1.5-flash
+LLM_GEMINI_RPMLIMIT=60
+LLM_GEMINI_REQUESTDELAYMS=1000
 
 # Alerts
 ALERT_TYPE=system
