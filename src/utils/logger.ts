@@ -1,5 +1,8 @@
 import winston from 'winston';
 
+// Export Logger type for use in other modules
+export type Logger = winston.Logger;
+
 // Define log levels
 const levels = {
   error: 0,

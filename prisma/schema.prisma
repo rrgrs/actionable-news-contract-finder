@@ -12,14 +12,98 @@ datasource db {
   extensions = [vector]
 }
 
-/// Tracks processed news articles to avoid reprocessing
+/// News processing pipeline status
+enum NewsStatus {
+  PENDING   // Just fetched, needs embedding
+  EMBEDDED  // Has embedding, needs market matching
+  MATCHED   // Matched with markets, needs LLM validation
+  VALIDATED // LLM validated, processing complete
+  FAILED    // Processing failed (will retry)
+}
+
+/// News articles fetched from various sources
+model NewsArticle {
+  id               Int         @id @default(autoincrement())
+  externalId       String      @unique @map("external_id") // Original ID from news source
+  source           String      // e.g., "reddit-news", "rss-aggregator", "gdelt-news"
+  title            String
+  content          String?
+  summary          String?
+  url              String?
+  author           String?
+  publishedAt      DateTime    @map("published_at")
+  tags             String[]    @default([])
+  metadata         Json?       // Source-specific metadata
+
+  // Processing pipeline status
+  status           NewsStatus  @default(PENDING)
+  errorMessage     String?     @map("error_message") // Error details if FAILED
+
+  // Embedding for matching against markets (768-dim vector)
+  embedding        Unsupported("vector(768)")?
+  embeddedAt       DateTime?   @map("embedded_at")
+
+  // Timestamps
+  fetchedAt        DateTime    @default(now()) @map("fetched_at")
+  matchedAt        DateTime?   @map("matched_at")
+  validatedAt      DateTime?   @map("validated_at")
+
+  // Relations
+  marketMatches    NewsMarketMatch[]
+
+  @@index([status])
+  @@index([source])
+  @@index([fetchedAt])
+  @@map("news_articles")
+}
+
+/// Stores matches between news articles and markets (before LLM validation)
+model NewsMarketMatch {
+  id                Int           @id @default(autoincrement())
+  newsArticleId     Int           @map("news_article_id")
+  marketId          Int           @map("market_id")
+
+  // Embedding similarity score
+  similarity        Float
+
+  // LLM validation results (null until validated)
+  isValidated       Boolean       @default(false) @map("is_validated")
+  isRelevant        Boolean?      @map("is_relevant")
+  relevanceScore    Float?        @map("relevance_score")
+  confidence        Float?
+  suggestedPosition String?       @map("suggested_position") // 'buy' | 'sell' | 'hold'
+  reasoning         String?
+
+  // Alert tracking
+  alertSent         Boolean       @default(false) @map("alert_sent")
+  alertSentAt       DateTime?     @map("alert_sent_at")
+
+  createdAt         DateTime      @default(now()) @map("created_at")
+  validatedAt       DateTime?     @map("validated_at")
+
+  newsArticle       NewsArticle   @relation(fields: [newsArticleId], references: [id], onDelete: Cascade)
+  market            Market        @relation(fields: [marketId], references: [id], onDelete: Cascade)
+
+  @@unique([newsArticleId, marketId])
+  @@index([newsArticleId])
+  @@index([marketId])
+  @@index([isValidated])
+  @@index([alertSent])
+  @@map("news_market_matches")
+}
+
+// =============================================================================
+// LEGACY: Keep for migration, will be removed after data migration
+// =============================================================================
+
+/// Tracks processed news articles to avoid reprocessing (LEGACY - use NewsArticle)
 model ProcessedNews {
   id               Int                     @id @default(autoincrement())
   newsId           String                  @unique @map("news_id")
-  title            String?                 // News article title
-  content          String?                 // News article content/summary
+  title            String?
+  content          String?
   processedAt      DateTime                @default(now()) @map("processed_at")
-  contractMatches  ProcessedNewsContract[] // FK back-reference (required by Prisma)
+  contractMatches  ProcessedNewsContract[]
 
   @@map("processed_news")
 }
@@ -70,7 +154,8 @@ model Market {
   updatedAt          DateTime   @updatedAt @map("updated_at")
 
   // Relations
-  contracts Contract[]
+  contracts   Contract[]
+  newsMatches NewsMarketMatch[]
 
   @@unique([platform, eventTicker])
   @@index([platform])

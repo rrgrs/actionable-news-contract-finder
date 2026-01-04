@@ -20,16 +20,6 @@ export interface AlertConfig {
   cooldownMinutes?: number; // Avoid alerting too frequently for the same market
 }
 
-export interface BetSyncConfig {
-  syncIntervalMs: number; // How often to sync bets from platforms (default: 300000 = 5 min)
-  embeddingBatchSize: number; // Batch size for embedding generation (default: 100)
-}
-
-export interface BetMatchingConfig {
-  topN: number; // Number of top matching bets to return (default: 50)
-  minSimilarity?: number; // Optional minimum similarity threshold
-}
-
 export interface EmbeddingProviderConfig {
   apiKey: string;
   model?: string; // Default: text-embedding-004
@@ -37,24 +27,26 @@ export interface EmbeddingProviderConfig {
   requestDelayMs?: number; // Default: 100
 }
 
+export interface MatchingConfig {
+  topN: number; // Number of top matching markets to return per article
+  minSimilarity?: number; // Optional minimum similarity threshold
+}
+
+export interface ValidationConfig {
+  minConfidenceScore: number; // Min confidence to send alerts
+  dryRun: boolean; // Simulate actions only
+  placeBets: boolean; // Actually place bets (requires dryRun=false)
+}
+
 export interface AppConfig {
   newsServices: ServiceConfig[];
   bettingPlatforms: ServiceConfig[];
   llmProviders: ServiceConfig[];
-  orchestrator: {
-    pollIntervalMs: number;
-    minRelevanceScore: number;
-    minConfidenceScore: number;
-    maxPositionsPerContract: number;
-    dryRun: boolean;
-    placeBets: boolean; // New: control whether to actually place bets
-  };
-  betSync: BetSyncConfig; // Bet synchronization config
-  betMatching: BetMatchingConfig; // Bet matching config
-  embedding: EmbeddingProviderConfig; // Embedding provider config
-  alerts: AlertConfig; // Alert configuration
+  embedding: EmbeddingProviderConfig;
+  matching: MatchingConfig;
+  validation: ValidationConfig;
+  alerts: AlertConfig;
   logLevel: string;
-  useV2Orchestrator: boolean; // Use embedding-based matching (V2) instead of legacy search-based
 }
 
 export interface ServicePluginInfo {

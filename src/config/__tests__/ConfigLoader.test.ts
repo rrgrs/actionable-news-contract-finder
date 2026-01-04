@@ -8,27 +8,19 @@ const createTestConfig = (overrides?: Partial<AppConfig>): AppConfig => ({
   newsServices: [],
   bettingPlatforms: [],
   llmProviders: [],
-  orchestrator: {
-    pollIntervalMs: 60000,
-    minRelevanceScore: 0.5,
+  embedding: {
+    apiKey: 'test-api-key',
+  },
+  matching: {
+    topN: 20,
+  },
+  validation: {
     minConfidenceScore: 0.6,
-    maxPositionsPerContract: 3,
     dryRun: true,
     placeBets: false,
   },
-  betSync: {
-    syncIntervalMs: 300000,
-    embeddingBatchSize: 100,
-  },
-  betMatching: {
-    topN: 50,
-  },
-  embedding: {
-    apiKey: '',
-  },
   alerts: { type: 'none' as const },
   logLevel: 'info',
-  useV2Orchestrator: false,
   ...overrides,
 });
 
@@ -66,13 +58,12 @@ describe('ConfigLoader', () => {
       process.env.NEWS_SERVICES = 'news1,news2';
       process.env.BETTING_PLATFORMS = 'betting1';
       process.env.LLM_PROVIDERS = 'llm1,llm2,llm3';
-      process.env.POLL_INTERVAL_MS = '30000';
-      process.env.MIN_RELEVANCE_SCORE = '0.7';
       process.env.MIN_CONFIDENCE_SCORE = '0.8';
-      process.env.MAX_POSITIONS_PER_CONTRACT = '5';
       process.env.DRY_RUN = 'false';
       process.env.PLACE_BETS = 'true';
       process.env.LOG_LEVEL = 'debug';
+      process.env.GEMINI_API_KEY = 'test-key';
+      process.env.TOP_MATCHING_MARKETS = '30';
       // Explicitly unset ALERT_TYPE to test default
       delete process.env.ALERT_TYPE;
 
@@ -84,13 +75,12 @@ describe('ConfigLoader', () => {
       expect(config.bettingPlatforms).toHaveLength(1);
       expect(config.bettingPlatforms[0].name).toBe('betting1');
       expect(config.llmProviders).toHaveLength(3);
-      expect(config.orchestrator.pollIntervalMs).toBe(30000);
-      expect(config.orchestrator.minRelevanceScore).toBe(0.7);
-      expect(config.orchestrator.minConfidenceScore).toBe(0.8);
-      expect(config.orchestrator.maxPositionsPerContract).toBe(5);
-      expect(config.orchestrator.dryRun).toBe(false);
-      expect(config.orchestrator.placeBets).toBe(true); // PLACE_BETS='true'
-      expect(config.alerts.type).toBe('none'); // Default when not set
+      expect(config.validation.minConfidenceScore).toBe(0.8);
+      expect(config.validation.dryRun).toBe(false);
+      expect(config.validation.placeBets).toBe(true);
+      expect(config.matching.topN).toBe(30);
+      expect(config.embedding.apiKey).toBe('test-key');
+      expect(config.alerts.type).toBe('none');
       expect(config.logLevel).toBe('debug');
     });
 
@@ -332,6 +322,43 @@ describe('ConfigLoader', () => {
         expect(errorMessage).toContain("News service 'invalid-news'");
         expect(errorMessage).toContain("Betting platform 'invalid-betting'");
       }
+    });
+
+    it('should fail validation when embedding API key is missing', async () => {
+      const config = createTestConfig({
+        newsServices: [
+          {
+            name: 'mock-news',
+            fileName: 'mocknews',
+            config: { name: 'mock-news' },
+          },
+        ],
+        bettingPlatforms: [
+          {
+            name: 'mock-betting',
+            fileName: 'mockbetting',
+            config: { name: 'mock-betting' },
+          },
+        ],
+        llmProviders: [
+          {
+            name: 'mock-llm',
+            fileName: 'mockllm',
+            config: { name: 'mock-llm' },
+          },
+        ],
+        embedding: {
+          apiKey: '', // Empty API key
+        },
+      });
+
+      const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
+
+      await expect(ConfigLoader.validateConfiguration(config)).rejects.toThrow(
+        /Embedding API key not configured/,
+      );
+
+      consoleSpy.mockRestore();
     });
   });
 

@@ -5,8 +5,8 @@ import {
   ServiceConfig,
   AlertConfig,
   AlertType,
-  BetSyncConfig,
-  BetMatchingConfig,
+  MatchingConfig,
+  ValidationConfig,
   EmbeddingProviderConfig,
 } from './types';
 import {
@@ -38,16 +38,9 @@ export class ConfigLoader {
       .filter((s) => s.length > 0);
   }
 
-  private static parseBetSyncConfig(): BetSyncConfig {
-    return {
-      syncIntervalMs: parseInt(process.env.BET_SYNC_INTERVAL_MS || '300000'), // 5 minutes default
-      embeddingBatchSize: parseInt(process.env.EMBEDDING_BATCH_SIZE || '100'),
-    };
-  }
-
-  private static parseBetMatchingConfig(): BetMatchingConfig {
-    const config: BetMatchingConfig = {
-      topN: parseInt(process.env.TOP_MATCHING_BETS || '50'),
+  private static parseMatchingConfig(): MatchingConfig {
+    const config: MatchingConfig = {
+      topN: parseInt(process.env.TOP_MATCHING_MARKETS || '20'),
     };
 
     if (process.env.MIN_SIMILARITY_SCORE) {
@@ -55,6 +48,14 @@ export class ConfigLoader {
     }
 
     return config;
+  }
+
+  private static parseValidationConfig(): ValidationConfig {
+    return {
+      minConfidenceScore: parseFloat(process.env.MIN_CONFIDENCE_SCORE || '0.6'),
+      dryRun: process.env.DRY_RUN !== 'false',
+      placeBets: process.env.PLACE_BETS === 'true',
+    };
   }
 
   private static parseEmbeddingConfig(): EmbeddingProviderConfig {
@@ -219,20 +220,11 @@ export class ConfigLoader {
           ...this.parseServiceConfig(name, 'LLM'),
         },
       })),
-      orchestrator: {
-        pollIntervalMs: parseInt(process.env.POLL_INTERVAL_MS || '60000'),
-        minRelevanceScore: parseFloat(process.env.MIN_RELEVANCE_SCORE || '0.5'),
-        minConfidenceScore: parseFloat(process.env.MIN_CONFIDENCE_SCORE || '0.6'),
-        maxPositionsPerContract: parseInt(process.env.MAX_POSITIONS_PER_CONTRACT || '3'),
-        dryRun: process.env.DRY_RUN !== 'false',
-        placeBets: process.env.PLACE_BETS === 'true', // Default to false for safety
-      },
-      betSync: this.parseBetSyncConfig(),
-      betMatching: this.parseBetMatchingConfig(),
       embedding: this.parseEmbeddingConfig(),
+      matching: this.parseMatchingConfig(),
+      validation: this.parseValidationConfig(),
       alerts: this.parseAlertConfig(),
       logLevel: process.env.LOG_LEVEL || 'info',
-      useV2Orchestrator: process.env.USE_V2_ORCHESTRATOR !== 'false', // Default to V2 (embedding-based)
     };
   }
 
@@ -349,6 +341,11 @@ export class ConfigLoader {
           `LLM provider '${provider.name}': ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    }
+
+    // Validate embedding API key
+    if (!config.embedding.apiKey) {
+      errors.push('Embedding API key not configured. Set GEMINI_API_KEY or EMBEDDING_API_KEY.');
     }
 
     if (errors.length > 0) {
