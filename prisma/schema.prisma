@@ -92,46 +92,6 @@ model NewsMarketMatch {
   @@map("news_market_matches")
 }
 
-// =============================================================================
-// LEGACY: Keep for migration, will be removed after data migration
-// =============================================================================
-
-/// Tracks processed news articles to avoid reprocessing (LEGACY - use NewsArticle)
-model ProcessedNews {
-  id               Int                     @id @default(autoincrement())
-  newsId           String                  @unique @map("news_id")
-  title            String?
-  content          String?
-  processedAt      DateTime                @default(now()) @map("processed_at")
-  contractMatches  ProcessedNewsContract[]
-
-  @@map("processed_news")
-}
-
-/// Stores LLM-validated matches between news and contracts
-model ProcessedNewsContract {
-  id                Int           @id @default(autoincrement())
-  processedNewsId   Int           @map("processed_news_id")
-  contractId        Int           @map("contract_id")
-
-  // LLM validation results
-  similarity        Float?        // Embedding similarity score (from market matching)
-  relevanceScore    Float         @map("relevance_score") // LLM-determined relevance (0-1)
-  confidence        Float         // LLM confidence in the suggested position (0-1)
-  suggestedPosition String        @map("suggested_position") // 'buy' | 'sell' | 'hold'
-  reasoning         String?       // LLM explanation
-
-  createdAt         DateTime      @default(now()) @map("created_at")
-
-  processedNews     ProcessedNews @relation(fields: [processedNewsId], references: [id], onDelete: Cascade)
-  contract          Contract      @relation(fields: [contractId], references: [id], onDelete: Cascade)
-
-  @@unique([processedNewsId, contractId])
-  @@index([processedNewsId])
-  @@index([contractId])
-  @@map("processed_news_contracts")
-}
-
 /// Market represents a prediction market question/event with multiple betting options
 model Market {
   id                 Int        @id @default(autoincrement())
@@ -186,8 +146,7 @@ model Contract {
   updatedAt      DateTime @updatedAt @map("updated_at")
 
   // Relations
-  market             Market                  @relation(fields: [marketId], references: [id], onDelete: Cascade)
-  processedNewsMatches ProcessedNewsContract[]
+  market Market @relation(fields: [marketId], references: [id], onDelete: Cascade)
 
   @@unique([contractTicker])
   @@index([marketId])
