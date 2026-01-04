@@ -17,3 +17,4 @@ coverage/
 *.sqlite
 *.sqlite3
 data/
+/src/generated/prisma

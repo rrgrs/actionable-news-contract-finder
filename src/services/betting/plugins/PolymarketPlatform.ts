@@ -212,7 +212,6 @@ export class PolymarketPlatform implements BettingPlatform {
       id: market.id,
       platform: 'polymarket',
       title: market.question,
-      description: market.description,
       yesPrice,
       noPrice,
       volume: parseFloat(market.volume),

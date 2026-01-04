@@ -76,7 +76,6 @@ export class OrchestratorService {
     this.logger.info('Service initialization complete', {
       last24HoursStats: {
         newsProcessed: stats.newsProcessed,
-        insightsGenerated: stats.insightsGenerated,
       },
     });
 
@@ -184,39 +183,15 @@ export class OrchestratorService {
 
               // Filter contracts based on the search query
               const relevantContracts = allContracts
-                .filter(
-                  (contract) =>
-                    contract.title
-                      .toLowerCase()
-                      .includes(action.relatedMarketQuery!.toLowerCase()) ||
-                    contract.description
-                      .toLowerCase()
-                      .includes(action.relatedMarketQuery!.toLowerCase()),
+                .filter((contract) =>
+                  contract.title.toLowerCase().includes(action.relatedMarketQuery!.toLowerCase()),
                 )
                 .slice(0, 10); // Limit to 10 contracts
 
               result.marketsSearched += relevantContracts.length;
 
               if (relevantContracts.length > 0) {
-                // Filter out contracts we've already validated for this news
-                const contractsToValidate: Contract[] = [];
-                for (const contract of relevantContracts) {
-                  const alreadyValidated = await this.persistenceService.isContractValidatedForNews(
-                    contract.id,
-                    insight.originalNewsId,
-                  );
-                  if (!alreadyValidated) {
-                    contractsToValidate.push(contract);
-                  }
-                }
-
-                if (contractsToValidate.length === 0) {
-                  this.logger.debug('All contracts already validated for this news item', {
-                    newsId: insight.originalNewsId,
-                    platform: platform.name,
-                  });
-                  continue;
-                }
+                const contractsToValidate = relevantContracts;
 
                 const contractValidations = await this.contractValidator.batchValidateContracts(
                   contractsToValidate,
@@ -225,16 +200,8 @@ export class OrchestratorService {
                 );
                 result.contractsValidated += contractValidations.length;
 
-                // Mark contracts as validated in the database
+                // Process validation results
                 for (const validation of contractValidations) {
-                  await this.persistenceService.markContractAsValidated(
-                    validation.contractId,
-                    platform.name,
-                    insight.originalNewsId,
-                    validation.relevanceScore,
-                    validation.suggestedPosition || 'hold',
-                  );
-
                   // Log the validation result using helper function
                   logContractValidation(
                     this.logger,
@@ -465,15 +432,12 @@ export class OrchestratorService {
       return true;
     });
 
-    // Mark all fetched news as processed (even if we don't generate insights for all)
+    // Mark all fetched news as processed with their text
     for (const item of deduplicatedNews) {
-      await this.persistenceService.markNewsAsProcessed(
-        item.id,
-        item.title,
-        item.source,
-        item.url,
-        false, // insightGenerated will be updated later if needed
-      );
+      await this.persistenceService.markNewsAsProcessed(item.id, {
+        title: item.title,
+        content: item.content?.substring(0, 5000), // Limit content size
+      });
     }
 
     return deduplicatedNews;
@@ -504,23 +468,8 @@ export class OrchestratorService {
         totalInsights: allInsights.length,
       });
 
-      // Save insights to database and mark news as having insights generated
+      // Log each actionable insight
       for (const insight of actionableInsights) {
-        await this.persistenceService.saveInsight(
-          insight.originalNewsId,
-          insight,
-          insight.relevanceScore,
-        );
-        // Update the news record to indicate an insight was generated
-        await this.persistenceService.markNewsAsProcessed(
-          insight.originalNewsId,
-          '', // title already saved
-          '', // source already saved
-          undefined,
-          true, // insightGenerated = true
-        );
-
-        // Log each actionable insight using helper function
         const newsItem = newsItems.find((n) => n.id === insight.originalNewsId);
         if (newsItem) {
           logArticleProcessing(

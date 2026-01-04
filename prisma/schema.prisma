@@ -1,0 +1,111 @@
+// Prisma schema for Actionable News Contract Finder
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+/// Tracks processed news articles to avoid reprocessing
+model ProcessedNews {
+  id               Int                     @id @default(autoincrement())
+  newsId           String                  @unique @map("news_id")
+  title            String?                 // News article title
+  content          String?                 // News article content/summary
+  processedAt      DateTime                @default(now()) @map("processed_at")
+  contractMatches  ProcessedNewsContract[] // FK back-reference (required by Prisma)
+
+  @@map("processed_news")
+}
+
+/// Stores LLM-validated matches between news and contracts
+model ProcessedNewsContract {
+  id                Int           @id @default(autoincrement())
+  processedNewsId   Int           @map("processed_news_id")
+  contractId        Int           @map("contract_id")
+
+  // LLM validation results
+  similarity        Float?        // Embedding similarity score (from market matching)
+  relevanceScore    Float         @map("relevance_score") // LLM-determined relevance (0-1)
+  confidence        Float         // LLM confidence in the suggested position (0-1)
+  suggestedPosition String        @map("suggested_position") // 'buy' | 'sell' | 'hold'
+  reasoning         String?       // LLM explanation
+
+  createdAt         DateTime      @default(now()) @map("created_at")
+
+  processedNews     ProcessedNews @relation(fields: [processedNewsId], references: [id], onDelete: Cascade)
+  contract          Contract      @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  @@unique([processedNewsId, contractId])
+  @@index([processedNewsId])
+  @@index([contractId])
+  @@map("processed_news_contracts")
+}
+
+/// Market represents a prediction market question/event with multiple betting options
+model Market {
+  id                 Int        @id @default(autoincrement())
+  platform           String
+  eventTicker        String     @map("event_ticker") // Platform-specific grouping key (e.g., "KXSPOTIFY2D")
+  seriesTicker       String?    @map("series_ticker") // Higher-level grouping (e.g., "KXSPOTIFY")
+  title              String // The market question
+  url                String
+  category           String?
+  endDate            DateTime?  @map("end_date")
+  isActive           Boolean    @default(true) @map("is_active")
+
+  // Embedding for semantic matching (at market level) - 768-dim vector
+  embedding          Unsupported("vector(768)")?
+  embeddingUpdatedAt DateTime?  @map("embedding_updated_at")
+
+  // Timestamps
+  lastSyncedAt       DateTime   @default(now()) @map("last_synced_at")
+  createdAt          DateTime   @default(now()) @map("created_at")
+  updatedAt          DateTime   @updatedAt @map("updated_at")
+
+  // Relations
+  contracts Contract[]
+
+  @@unique([platform, eventTicker])
+  @@index([platform])
+  @@index([isActive])
+  @@map("markets")
+}
+
+/// Contract represents an individual betting option within a Market
+model Contract {
+  id             Int      @id @default(autoincrement())
+  marketId       Int      @map("market_id")
+  contractTicker String   @map("contract_ticker") // Platform's unique ID (e.g., "KXBTC-26JAN0109-T97749.99")
+  title          String   // The betting option (e.g., "Bitcoin above $97,750")
+
+  // Pricing
+  yesPrice       Float    @default(0) @map("yes_price")
+  noPrice        Float    @default(0) @map("no_price")
+  volume         Float    @default(0)
+  liquidity      Float    @default(0)
+
+  // Metadata (platform-specific details - non-redundant fields only)
+  metadata       String?
+  isActive       Boolean  @default(true) @map("is_active")
+
+  // Timestamps
+  lastSyncedAt   DateTime @default(now()) @map("last_synced_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  market             Market                  @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  processedNewsMatches ProcessedNewsContract[]
+
+  @@unique([contractTicker])
+  @@index([marketId])
+  @@index([isActive])
+  @@map("contracts")
+}

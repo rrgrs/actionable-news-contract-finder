@@ -58,8 +58,8 @@ export class GroqLLMProvider implements LLMProvider {
   private maxTokens: number = 4096;
   private lastRequestTime = Date.now();
   private requestTimes: number[] = []; // Track request times for sliding window
-  private rpmLimit = 10; // Be very conservative: 10 requests per minute (free tier is ~30)
-  private requestDelayMs = 6000; // Minimum 6 seconds between requests
+  private rpmLimit = 25; // Free tier allows ~30 RPM, use 25 to stay safe
+  private requestDelayMs = 2500; // Minimum 2.5 seconds between requests
 
   // Dynamic rate limit tracking from headers
   private rateLimitInfo = {

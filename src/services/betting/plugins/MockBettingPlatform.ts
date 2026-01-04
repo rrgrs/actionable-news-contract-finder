@@ -29,8 +29,6 @@ export class MockBettingPlatform implements BettingPlatform {
         id: `contract-fed-${Date.now()}`,
         platform: this.name,
         title: 'Will the Fed cut rates in Q1 2025?',
-        description:
-          'This market resolves YES if the Federal Reserve cuts interest rates by any amount in Q1 2025',
         yesPrice: 0.65,
         noPrice: 0.35,
         volume: 250000,
@@ -47,7 +45,6 @@ export class MockBettingPlatform implements BettingPlatform {
         id: `contract-tesla-${Date.now()}`,
         platform: this.name,
         title: 'Tesla stock above $400 by end of 2025?',
-        description: 'Resolves YES if TSLA closes above $400 on December 31, 2025',
         yesPrice: 0.45,
         noPrice: 0.55,
         volume: 180000,

@@ -28,28 +28,24 @@ export class GDELTNewsService implements NewsService {
   // private updateInterval = 15; // GDELT updates every 15 minutes - unused
   private maxRecords = 250;
   private languages = ['english'];
-  private themes: string[] = [];
+  private keywords: string[] = [];
   private countries: string[] = [];
   private minTone: number | null = null;
   private maxTone: number | null = null;
 
-  // GDELT themes relevant to financial markets
-  private readonly marketThemes = [
-    'ECON_STOCKMARKET',
-    'ECON_INTEREST_RATE',
-    'ECON_INFLATION',
-    'ECON_CURRENCY',
-    'ECON_TRADE',
-    'ECON_BANKRUPTCY',
-    'ECON_MERGER',
-    'ECON_IPO',
-    'TAX_POLICY',
-    'CENTRAL_BANK',
-    'FEDERAL_RESERVE',
-    'WB_ECONOMICS',
-    'WB_FINANCE',
-    'CRYPTOCURRENCY',
-    'COMMODITY_MARKETS',
+  // Financial keywords that work with GDELT's article search
+  // Note: GDELT theme filters (e.g., ECON_STOCKMARKET) don't return results reliably
+  // Keep list short - GDELT has query length limits
+  private readonly defaultKeywords = [
+    'federal reserve',
+    'interest rate',
+    'stock market',
+    'earnings',
+    'merger',
+    'acquisition',
+    'IPO',
+    'bankruptcy',
+    'inflation',
   ];
 
   async initialize(config: NewsServiceConfig): Promise<void> {
@@ -65,13 +61,13 @@ export class GDELTNewsService implements NewsService {
         .map((l: string) => l.trim());
     }
 
-    if (customConfig?.themes) {
-      this.themes = String(customConfig.themes)
+    if (customConfig?.keywords) {
+      this.keywords = String(customConfig.keywords)
         .split(',')
-        .map((t: string) => t.trim());
+        .map((k: string) => k.trim());
     } else {
-      // Use default market-related themes
-      this.themes = [...this.marketThemes];
+      // Use default financial keywords
+      this.keywords = [...this.defaultKeywords];
     }
 
     if (customConfig?.countries) {
@@ -90,7 +86,7 @@ export class GDELTNewsService implements NewsService {
 
     console.log('GDELT News Service initialized');
     console.log(`Languages: ${this.languages.join(', ')}`);
-    console.log(`Monitoring ${this.themes.length} themes`);
+    console.log(`Monitoring ${this.keywords.length} keywords`);
     if (this.countries.length > 0) {
       console.log(`Countries: ${this.countries.join(', ')}`);
     }
@@ -158,6 +154,12 @@ export class GDELTNewsService implements NewsService {
         timeout: 30000, // Increased timeout to 30 seconds for GDELT API
       });
 
+      // Check if response is a string (error message) instead of JSON
+      if (typeof response.data === 'string') {
+        console.error('GDELT API error:', response.data);
+        return [];
+      }
+
       if (response.data.status === 'error') {
         console.error('GDELT API error:', response.data.message);
         return [];
@@ -207,23 +209,16 @@ export class GDELTNewsService implements NewsService {
   }
 
   private buildQuery(): string {
-    const queries: string[] = [];
-
-    // Add theme queries
-    if (this.themes.length > 0) {
-      queries.push(`theme:${this.themes.join(' OR theme:')}`);
+    // Build keyword-based query (GDELT theme filters don't return results reliably)
+    if (this.keywords.length === 0) {
+      return '("stock market" OR "federal reserve")';
     }
 
-    // Add default financial keywords if no themes specified
-    if (queries.length === 0) {
-      queries.push(
-        '("federal reserve" OR "interest rate" OR "stock market" OR ' +
-          '"earnings report" OR "merger" OR "acquisition" OR "IPO" OR ' +
-          '"bankruptcy" OR "inflation" OR "GDP" OR "unemployment")',
-      );
-    }
+    // Quote multi-word keywords, leave single words unquoted
+    const quotedKeywords = this.keywords.map((kw) => (kw.includes(' ') ? `"${kw}"` : kw));
 
-    return queries.join(' AND ');
+    // GDELT requires OR queries to be wrapped in parentheses
+    return `(${quotedKeywords.join(' OR ')})`;
   }
 
   private async fetchArticleContent(article: GDELTArticle): Promise<string> {

@@ -4,6 +4,7 @@ import { NewsServiceRegistry } from './services/news/NewsServiceRegistry';
 import { BettingPlatformRegistry } from './services/betting/BettingPlatformRegistry';
 import { LLMProviderRegistry } from './services/llm/LLMProviderRegistry';
 import { OrchestratorService } from './services/orchestrator/OrchestratorService';
+import { OrchestratorServiceV2 } from './services/orchestrator/OrchestratorServiceV2';
 
 dotenv.config();
 
@@ -36,22 +37,71 @@ async function main() {
       );
 
     // Create orchestrator with all services
-    const orchestrator = new OrchestratorService(
-      config.orchestrator,
-      newsServices,
-      bettingPlatforms,
-      llmProviders,
-      config.alerts,
-    );
+    let orchestrator: OrchestratorService | OrchestratorServiceV2;
+
+    if (config.useV2Orchestrator) {
+      // Check if embedding API key is available
+      if (!config.embedding.apiKey) {
+        console.warn('\n⚠️  Warning: V2 orchestrator requires an embedding API key.');
+        console.warn('   Set GEMINI_API_KEY or EMBEDDING_API_KEY in your .env file.');
+        console.warn('   Falling back to legacy orchestrator (search-based).\n');
+
+        orchestrator = new OrchestratorService(
+          config.orchestrator,
+          newsServices,
+          bettingPlatforms,
+          llmProviders,
+          config.alerts,
+        );
+      } else {
+        // Use V2 orchestrator with embedding-based matching
+        orchestrator = new OrchestratorServiceV2(
+          {
+            ...config.orchestrator,
+            marketSyncIntervalMs: config.betSync.syncIntervalMs,
+            embeddingBatchSize: config.betSync.embeddingBatchSize,
+            topMatchingMarkets: config.betMatching.topN,
+            minSimilarityScore: config.betMatching.minSimilarity,
+          },
+          newsServices,
+          bettingPlatforms,
+          llmProviders,
+          config.embedding,
+          config.alerts,
+        );
+      }
+    } else {
+      // Use legacy orchestrator (search-based)
+      orchestrator = new OrchestratorService(
+        config.orchestrator,
+        newsServices,
+        bettingPlatforms,
+        llmProviders,
+        config.alerts,
+      );
+    }
 
     console.log('\n✅ All services initialized successfully');
     console.log('\n📊 Orchestrator Configuration:');
+    console.log(
+      `  - Architecture: ${orchestrator instanceof OrchestratorServiceV2 ? 'V2 (Embedding-based)' : 'Legacy (Search-based)'}`,
+    );
     console.log(`  - Poll Interval: ${config.orchestrator.pollIntervalMs}ms`);
     console.log(`  - Min Relevance Score: ${config.orchestrator.minRelevanceScore}`);
     console.log(`  - Min Confidence Score: ${config.orchestrator.minConfidenceScore}`);
     console.log(`  - Max Positions Per Contract: ${config.orchestrator.maxPositionsPerContract}`);
     console.log(`  - Dry Run Mode: ${config.orchestrator.dryRun ? 'ENABLED' : 'DISABLED'}`);
     console.log(`  - Place Bets: ${config.orchestrator.placeBets ? 'ENABLED' : 'DISABLED'}`);
+
+    if (orchestrator instanceof OrchestratorServiceV2) {
+      console.log('\n📊 Market Sync Configuration (V2):');
+      console.log(`  - Sync Interval: ${config.betSync.syncIntervalMs / 60000} minutes`);
+      console.log(`  - Top Matching Markets: ${config.betMatching.topN}`);
+      console.log(`  - Embedding Model: ${config.embedding.model || 'text-embedding-004'}`);
+      if (config.betMatching.minSimilarity) {
+        console.log(`  - Min Similarity: ${config.betMatching.minSimilarity}`);
+      }
+    }
     console.log('');
 
     console.log('\n📢 Alert Configuration:');

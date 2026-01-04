@@ -49,6 +49,8 @@ interface GeminiResponse {
 }
 
 type GeminiModelKey =
+  | 'gemini-3-flash-preview'
+  | 'gemini-2.0-flash'
   | 'gemini-1.5-flash'
   | 'gemini-1.5-flash-002'
   | 'gemini-1.5-pro'
@@ -60,17 +62,19 @@ export class GeminiLLMProvider implements LLMProvider {
   private apiKey: string = '';
   private baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
   private client!: AxiosInstance;
-  private model: string = 'gemini-1.5-flash'; // Default to Gemini 1.5 Flash (best free tier)
+  private model: string = 'gemini-3-flash-preview'; // Default to Gemini 3 Flash Preview
   private temperature: number = 0.7;
   private maxTokens: number = 8192;
   private lastRequestTime = Date.now();
   private requestTimes: number[] = []; // Track request times for sliding window
-  private rpmLimit = 60; // Free tier: 60 requests per minute
+  private rpmLimit = 15; // Free tier: 15 requests per minute
   private requestDelayMs = 1000; // Minimum 1 second between requests
 
-  // Available Gemini models (as of 2024)
+  // Available Gemini models (as of 2025)
   private readonly availableModels: Record<GeminiModelKey, string> = {
-    'gemini-1.5-flash': 'Gemini 1.5 Flash (Fast, 1M context, best for free tier)',
+    'gemini-3-flash-preview': 'Gemini 3 Flash Preview (Latest, recommended)',
+    'gemini-2.0-flash': 'Gemini 2.0 Flash (Fast, multimodal)',
+    'gemini-1.5-flash': 'Gemini 1.5 Flash (Fast, 1M context)',
     'gemini-1.5-flash-002': 'Gemini 1.5 Flash Latest (Enhanced version)',
     'gemini-1.5-pro': 'Gemini 1.5 Pro (Advanced, 2M context)',
     'gemini-1.5-pro-002': 'Gemini 1.5 Pro Latest (Enhanced version)',

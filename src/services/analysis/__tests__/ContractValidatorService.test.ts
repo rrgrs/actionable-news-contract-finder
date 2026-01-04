@@ -27,7 +27,6 @@ describe('ContractValidatorService', () => {
       id: 'contract-1',
       platform: 'test-platform',
       title: 'Fed Cuts Rates in Q1',
-      description: 'Will the Federal Reserve cut interest rates in Q1?',
       yesPrice: 0.65,
       noPrice: 0.35,
       volume: 100000,
@@ -227,13 +226,11 @@ describe('ContractValidatorService', () => {
           ...testContract,
           id: 'contract-1',
           title: 'Random Market',
-          description: 'Random description',
         },
         {
           ...testContract,
           id: 'contract-2',
-          title: 'Fed Rate Decision',
-          description: 'Federal Reserve rate decision',
+          title: 'Fed Rate Decision Federal Reserve',
         },
       ];
 
@@ -269,7 +266,6 @@ describe('ContractValidatorService', () => {
       const unrelatedContract = {
         ...testContract,
         title: 'Bitcoin Price',
-        description: 'Will Bitcoin reach $100k?',
       };
 
       mockLLMProvider.generateCompletion = jest.fn().mockResolvedValue('No relevance found');

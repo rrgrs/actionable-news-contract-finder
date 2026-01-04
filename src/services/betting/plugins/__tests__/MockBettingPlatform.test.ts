@@ -37,7 +37,6 @@ describe('MockBettingPlatform', () => {
           id: expect.any(String),
           platform: expect.any(String),
           title: expect.any(String),
-          description: expect.any(String),
           yesPrice: expect.any(Number),
           noPrice: expect.any(Number),
           volume: expect.any(Number),

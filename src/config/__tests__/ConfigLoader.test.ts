@@ -1,6 +1,36 @@
 import { ConfigLoader } from '../ConfigLoader';
 import * as path from 'path';
 import { NewsServicePlugin, BettingPlatformPlugin, LLMProviderPlugin } from '../../types';
+import { AppConfig } from '../types';
+
+// Helper to create a valid full config for tests
+const createTestConfig = (overrides?: Partial<AppConfig>): AppConfig => ({
+  newsServices: [],
+  bettingPlatforms: [],
+  llmProviders: [],
+  orchestrator: {
+    pollIntervalMs: 60000,
+    minRelevanceScore: 0.5,
+    minConfidenceScore: 0.6,
+    maxPositionsPerContract: 3,
+    dryRun: true,
+    placeBets: false,
+  },
+  betSync: {
+    syncIntervalMs: 300000,
+    embeddingBatchSize: 100,
+  },
+  betMatching: {
+    topN: 50,
+  },
+  embedding: {
+    apiKey: '',
+  },
+  alerts: { type: 'none' as const },
+  logLevel: 'info',
+  useV2Orchestrator: false,
+  ...overrides,
+});
 
 // Type definitions for mock registries
 type MockNewsRegistry = {
@@ -231,7 +261,7 @@ describe('ConfigLoader', () => {
 
   describe('validateConfiguration', () => {
     it('should validate all configured services', async () => {
-      const config = {
+      const config = createTestConfig({
         newsServices: [
           {
             name: 'mock-news',
@@ -253,17 +283,7 @@ describe('ConfigLoader', () => {
             config: { name: 'mock-llm' },
           },
         ],
-        orchestrator: {
-          pollIntervalMs: 60000,
-          minRelevanceScore: 0.5,
-          minConfidenceScore: 0.6,
-          maxPositionsPerContract: 3,
-          dryRun: true,
-          placeBets: false,
-        },
-        logLevel: 'info',
-        alerts: { type: 'none' as const },
-      };
+      });
 
       const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
 
@@ -283,7 +303,7 @@ describe('ConfigLoader', () => {
     });
 
     it('should throw error with details when validation fails', async () => {
-      const config = {
+      const config = createTestConfig({
         newsServices: [
           {
             name: 'invalid-news',
@@ -299,17 +319,7 @@ describe('ConfigLoader', () => {
           },
         ],
         llmProviders: [],
-        orchestrator: {
-          pollIntervalMs: 60000,
-          minRelevanceScore: 0.5,
-          minConfidenceScore: 0.6,
-          maxPositionsPerContract: 3,
-          dryRun: true,
-          placeBets: false,
-        },
-        logLevel: 'info',
-        alerts: { type: 'none' as const },
-      };
+      });
 
       await expect(ConfigLoader.validateConfiguration(config)).rejects.toThrow(
         /Configuration validation failed/,
@@ -327,7 +337,7 @@ describe('ConfigLoader', () => {
 
   describe('loadAndRegisterServices', () => {
     it('should load and register all services', async () => {
-      const config = {
+      const config = createTestConfig({
         newsServices: [
           {
             name: 'mock-news',
@@ -349,17 +359,7 @@ describe('ConfigLoader', () => {
             config: { name: 'mock-llm' },
           },
         ],
-        orchestrator: {
-          pollIntervalMs: 60000,
-          minRelevanceScore: 0.5,
-          minConfidenceScore: 0.6,
-          maxPositionsPerContract: 3,
-          dryRun: true,
-          placeBets: false,
-        },
-        logLevel: 'info',
-        alerts: { type: 'none' as const },
-      };
+      });
 
       const mockNewsRegistry: MockNewsRegistry = {
         registerPlugin: jest.fn(),

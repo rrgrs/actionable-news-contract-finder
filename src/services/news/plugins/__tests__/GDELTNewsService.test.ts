@@ -16,7 +16,7 @@ describe('GDELTNewsService', () => {
       customConfig: {
         maxRecords: '100',
         languages: 'english',
-        themes: 'ECON_STOCKMARKET,ECON_INTEREST_RATE',
+        keywords: 'federal reserve,stock market,earnings',
         countries: 'US,GB',
         minTone: '-5',
         maxTone: '5',
@@ -35,7 +35,7 @@ describe('GDELTNewsService', () => {
       expect(service.name).toBe('gdelt-news');
     });
 
-    it('should use default market themes when not configured', async () => {
+    it('should use default keywords when not configured', async () => {
       const defaultConfig: NewsServiceConfig = { name: 'gdelt-news' };
       await service.initialize(defaultConfig);
       expect(service.name).toBe('gdelt-news');
@@ -92,7 +92,7 @@ describe('GDELTNewsService', () => {
       expect(news[0].metadata?.importance).toBeDefined();
     });
 
-    it('should filter by configured themes', async () => {
+    it('should filter by configured keywords', async () => {
       const mockResponse = {
         data: {
           articles: [
@@ -119,7 +119,7 @@ describe('GDELTNewsService', () => {
         expect.stringContaining('/api/v2/doc/doc'),
         expect.objectContaining({
           params: expect.objectContaining({
-            query: expect.stringContaining('ECON_STOCKMARKET'),
+            query: expect.stringContaining('federal reserve'),
           }),
         }),
       );

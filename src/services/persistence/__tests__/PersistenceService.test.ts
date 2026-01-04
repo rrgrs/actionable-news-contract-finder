@@ -1,52 +1,60 @@
-import 'reflect-metadata';
-import { PersistenceService } from '../PersistenceService';
-import * as fs from 'fs';
-import * as path from 'path';
+import { PersistenceService, ContractMatch } from '../PersistenceService';
+import prisma from '../../../lib/prisma';
 
 describe('PersistenceService', () => {
   let persistenceService: PersistenceService;
-  const testDbPath = './test-data/test.db';
+  let testMarketId: number;
+  let testContractTicker: string;
 
-  beforeEach(() => {
-    // Clean up any existing test database
-    const testDir = path.dirname(testDbPath);
-    if (fs.existsSync(testDbPath)) {
-      fs.unlinkSync(testDbPath);
-    }
-    if (!fs.existsSync(testDir)) {
-      fs.mkdirSync(testDir, { recursive: true });
-    }
+  beforeEach(async () => {
+    // Clean up all data before each test
+    await prisma.processedNewsContract.deleteMany();
+    await prisma.processedNews.deleteMany();
 
-    persistenceService = new PersistenceService(testDbPath);
+    // Create a test market and contract for relation tests
+    const testMarket = await prisma.market.upsert({
+      where: { platform_eventTicker: { platform: 'test', eventTicker: 'TEST-MARKET' } },
+      update: {},
+      create: {
+        platform: 'test',
+        eventTicker: 'TEST-MARKET',
+        title: 'Test Market',
+        url: 'https://example.com/test',
+      },
+    });
+    testMarketId = testMarket.id;
+
+    // Create a test contract
+    const testContract = await prisma.contract.upsert({
+      where: { contractTicker: 'TEST-CONTRACT-1' },
+      update: {},
+      create: {
+        marketId: testMarketId,
+        contractTicker: 'TEST-CONTRACT-1',
+        title: 'Test Contract Option',
+        yesPrice: 0.5,
+        noPrice: 0.5,
+      },
+    });
+    testContractTicker = testContract.contractTicker;
+
+    persistenceService = new PersistenceService();
+    await persistenceService.initialize();
   });
 
-  afterEach(async () => {
-    // Close the database connection
-    if (persistenceService) {
-      await persistenceService.close();
-    }
-
-    // Clean up test database
-    if (fs.existsSync(testDbPath)) {
-      fs.unlinkSync(testDbPath);
-    }
-
-    // Remove test directory if empty
-    const testDir = path.dirname(testDbPath);
-    if (fs.existsSync(testDir)) {
-      const files = fs.readdirSync(testDir);
-      if (files.length === 0) {
-        fs.rmdirSync(testDir);
-      }
-    }
+  afterAll(async () => {
+    // Final cleanup and disconnect
+    await prisma.processedNewsContract.deleteMany();
+    await prisma.processedNews.deleteMany();
+    await prisma.contract.deleteMany({ where: { market: { platform: 'test' } } });
+    await prisma.market.deleteMany({ where: { platform: 'test' } });
+    await prisma.$disconnect();
   });
 
   describe('initialize', () => {
     it('should initialize the database successfully', async () => {
-      await expect(persistenceService.initialize()).resolves.not.toThrow();
-
-      // Verify database file was created
-      expect(fs.existsSync(testDbPath)).toBe(true);
+      const newService = new PersistenceService();
+      await expect(newService.initialize()).resolves.not.toThrow();
     });
 
     it('should be idempotent when called multiple times', async () => {
@@ -56,17 +64,10 @@ describe('PersistenceService', () => {
   });
 
   describe('news processing', () => {
-    beforeEach(async () => {
-      await persistenceService.initialize();
-    });
-
     it('should mark news as processed', async () => {
       const newsId = 'news-123';
-      const title = 'Test News';
-      const source = 'TestSource';
-      const url = 'https://example.com/news';
 
-      await persistenceService.markNewsAsProcessed(newsId, title, source, url, false);
+      await persistenceService.markNewsAsProcessed(newsId);
 
       const isProcessed = await persistenceService.isNewsProcessed(newsId);
       expect(isProcessed).toBe(true);
@@ -79,21 +80,17 @@ describe('PersistenceService', () => {
 
     it('should handle duplicate news IDs gracefully', async () => {
       const newsId = 'news-456';
-      const title = 'Test News';
-      const source = 'TestSource';
 
-      await persistenceService.markNewsAsProcessed(newsId, title, source);
+      await persistenceService.markNewsAsProcessed(newsId);
 
       // Try to mark the same news as processed again - should not throw
-      await expect(
-        persistenceService.markNewsAsProcessed(newsId, 'Different Title', 'Different Source'),
-      ).resolves.not.toThrow();
+      await expect(persistenceService.markNewsAsProcessed(newsId)).resolves.not.toThrow();
     });
 
     it('should retrieve processed news IDs', async () => {
-      await persistenceService.markNewsAsProcessed('news-1', 'Title 1', 'Source 1');
-      await persistenceService.markNewsAsProcessed('news-2', 'Title 2', 'Source 2');
-      await persistenceService.markNewsAsProcessed('news-3', 'Title 3', 'Source 3');
+      await persistenceService.markNewsAsProcessed('news-1');
+      await persistenceService.markNewsAsProcessed('news-2');
+      await persistenceService.markNewsAsProcessed('news-3');
 
       const processedIds = await persistenceService.getProcessedNewsIds();
 
@@ -105,14 +102,14 @@ describe('PersistenceService', () => {
     });
 
     it('should filter processed news by date', async () => {
-      await persistenceService.markNewsAsProcessed('news-old', 'Old News', 'Source');
+      await persistenceService.markNewsAsProcessed('news-old');
 
       // Wait a bit and then add new news
       await new Promise((resolve) => setTimeout(resolve, 100));
       const afterDate = new Date();
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      await persistenceService.markNewsAsProcessed('news-new', 'New News', 'Source');
+      await persistenceService.markNewsAsProcessed('news-new');
 
       const recentIds = await persistenceService.getProcessedNewsIds(afterDate);
 
@@ -120,126 +117,169 @@ describe('PersistenceService', () => {
       expect(recentIds.has('news-new')).toBe(true);
       expect(recentIds.has('news-old')).toBe(false);
     });
-  });
 
-  describe('contract validation', () => {
-    beforeEach(async () => {
-      await persistenceService.initialize();
-    });
+    it('should store news title and content', async () => {
+      const newsId = 'news-with-content';
+      const title = 'Breaking News: Test Title';
+      const content = 'This is the full news content for testing purposes.';
 
-    it('should mark contract as validated', async () => {
-      const contractId = 'contract-123';
-      const platform = 'TestPlatform';
-      const newsId = 'news-123';
-      const relevanceScore = 0.85;
-      const action = 'BUY';
+      await persistenceService.markNewsAsProcessed(newsId, { title, content });
 
-      // First create the news item (required for foreign key)
-      await persistenceService.markNewsAsProcessed(newsId, 'Test News', 'TestSource');
+      const record = await prisma.processedNews.findUnique({
+        where: { newsId },
+      });
 
-      await persistenceService.markContractAsValidated(
-        contractId,
-        platform,
-        newsId,
-        relevanceScore,
-        action,
-      );
-
-      const isValidated = await persistenceService.isContractValidatedForNews(contractId, newsId);
-      expect(isValidated).toBe(true);
-    });
-
-    it('should return false for unvalidated contract-news pairs', async () => {
-      const isValidated = await persistenceService.isContractValidatedForNews(
-        'unknown',
-        'news-123',
-      );
-      expect(isValidated).toBe(false);
-    });
-
-    it('should handle duplicate contract-news pairs', async () => {
-      const contractId = 'contract-456';
-      const newsId = 'news-456';
-
-      // First create the news item (required for foreign key)
-      await persistenceService.markNewsAsProcessed(newsId, 'Test News', 'TestSource');
-
-      await persistenceService.markContractAsValidated(contractId, 'Platform', newsId, 0.8, 'HOLD');
-
-      // Try to validate again - should not throw due to unique constraint
-      await expect(
-        persistenceService.markContractAsValidated(contractId, 'Platform', newsId, 0.9, 'SELL'),
-      ).resolves.not.toThrow();
+      expect(record).not.toBeNull();
+      expect(record?.title).toBe(title);
+      expect(record?.content).toBe(content);
     });
   });
 
-  describe('insights', () => {
-    beforeEach(async () => {
-      await persistenceService.initialize();
+  describe('contract matching', () => {
+    it('should save contract matches with LLM validation data', async () => {
+      const newsId = 'news-with-matches';
+      await persistenceService.markNewsAsProcessed(newsId, { title: 'Test News' });
+
+      const matches: ContractMatch[] = [
+        {
+          contractTicker: testContractTicker,
+          similarity: 0.95,
+          relevanceScore: 0.8,
+          confidence: 0.75,
+          suggestedPosition: 'buy',
+          reasoning: 'Strong correlation with news event',
+        },
+      ];
+
+      const savedCount = await persistenceService.saveContractMatches(newsId, matches);
+
+      expect(savedCount).toBe(1);
+
+      const records = await prisma.processedNewsContract.findMany({
+        where: { processedNews: { newsId } },
+      });
+
+      expect(records.length).toBe(1);
+      expect(records[0].similarity).toBe(0.95);
+      expect(records[0].relevanceScore).toBe(0.8);
+      expect(records[0].confidence).toBe(0.75);
+      expect(records[0].suggestedPosition).toBe('buy');
+      expect(records[0].reasoning).toBe('Strong correlation with news event');
     });
 
-    it('should save insights', async () => {
-      const newsId = 'news-789';
-      const insightData = {
-        summary: 'Test insight',
-        predictions: ['prediction1', 'prediction2'],
-      };
-      const relevanceScore = 0.75;
+    it('should update contract matches on reprocess', async () => {
+      const newsId = 'news-reprocess';
+      await persistenceService.markNewsAsProcessed(newsId, { title: 'Original Title' });
 
-      // First mark the news as processed (required for foreign key)
-      await persistenceService.markNewsAsProcessed(newsId, 'Title', 'Source');
+      // First save with initial data
+      await persistenceService.saveContractMatches(newsId, [
+        {
+          contractTicker: testContractTicker,
+          similarity: 0.8,
+          relevanceScore: 0.6,
+          confidence: 0.5,
+          suggestedPosition: 'hold',
+        },
+      ]);
 
-      await expect(
-        persistenceService.saveInsight(newsId, insightData, relevanceScore),
-      ).resolves.not.toThrow();
+      // Update with new data
+      await persistenceService.saveContractMatches(newsId, [
+        {
+          contractTicker: testContractTicker,
+          similarity: 0.9,
+          relevanceScore: 0.85,
+          confidence: 0.9,
+          suggestedPosition: 'buy',
+          reasoning: 'Updated analysis',
+        },
+      ]);
+
+      const records = await prisma.processedNewsContract.findMany({
+        where: { processedNews: { newsId } },
+      });
+
+      expect(records.length).toBe(1);
+      expect(records[0].similarity).toBe(0.9);
+      expect(records[0].confidence).toBe(0.9);
+      expect(records[0].suggestedPosition).toBe('buy');
     });
 
-    it('should update news as having insight generated', async () => {
-      const newsId = 'news-insight';
+    it('should get contract matches with market context', async () => {
+      const newsId = 'news-get-matches';
+      await persistenceService.markNewsAsProcessed(newsId, { title: 'Test News' });
 
-      // Mark news as processed without insight
-      await persistenceService.markNewsAsProcessed(newsId, 'Title', 'Source', undefined, false);
+      await persistenceService.saveContractMatches(newsId, [
+        {
+          contractTicker: testContractTicker,
+          similarity: 0.88,
+          relevanceScore: 0.75,
+          confidence: 0.8,
+          suggestedPosition: 'sell',
+          reasoning: 'Market overpriced',
+        },
+      ]);
 
-      // Save an insight
-      await persistenceService.saveInsight(newsId, { data: 'test' }, 0.8);
+      const matches = await persistenceService.getContractMatches(newsId);
 
-      // Check if the news is marked as having insight
-      // We'll need to verify this through stats or by checking the database
-      const stats = await persistenceService.getRecentStats(24);
-      expect(stats.insightsGenerated).toBeGreaterThanOrEqual(1);
+      expect(matches.length).toBe(1);
+      expect(matches[0].contractTicker).toBe(testContractTicker);
+      expect(matches[0].contractTitle).toBe('Test Contract Option');
+      expect(matches[0].marketTitle).toBe('Test Market');
+      expect(matches[0].similarity).toBe(0.88);
+      expect(matches[0].relevanceScore).toBe(0.75);
+      expect(matches[0].confidence).toBe(0.8);
+      expect(matches[0].suggestedPosition).toBe('sell');
+      expect(matches[0].reasoning).toBe('Market overpriced');
+    });
+
+    it('should return empty array for news with no matches', async () => {
+      const matches = await persistenceService.getContractMatches('non-existent-news');
+      expect(matches).toEqual([]);
+    });
+
+    it('should skip invalid contract tickers', async () => {
+      const newsId = 'news-invalid-contract';
+      await persistenceService.markNewsAsProcessed(newsId, { title: 'Test News' });
+
+      const savedCount = await persistenceService.saveContractMatches(newsId, [
+        {
+          contractTicker: 'INVALID-CONTRACT-TICKER',
+          similarity: 0.9,
+          relevanceScore: 0.8,
+          confidence: 0.7,
+          suggestedPosition: 'buy',
+        },
+      ]);
+
+      expect(savedCount).toBe(0);
     });
   });
 
   describe('statistics', () => {
-    beforeEach(async () => {
-      await persistenceService.initialize();
-    });
-
-    it('should return recent statistics', async () => {
+    it('should return recent statistics including contract matches', async () => {
       // Add some test data
-      await persistenceService.markNewsAsProcessed('news-stat-1', 'Title 1', 'Source');
-      await persistenceService.markNewsAsProcessed('news-stat-2', 'Title 2', 'Source');
-      await persistenceService.saveInsight('news-stat-1', { test: true }, 0.9);
-      await persistenceService.markContractAsValidated(
-        'contract-1',
-        'Platform',
-        'news-stat-1',
-        0.8,
-        'BUY',
-      );
+      await persistenceService.markNewsAsProcessed('news-stat-1');
+      await persistenceService.markNewsAsProcessed('news-stat-2');
+
+      // Add a contract match
+      await persistenceService.saveContractMatches('news-stat-1', [
+        {
+          contractTicker: testContractTicker,
+          relevanceScore: 0.8,
+          confidence: 0.7,
+          suggestedPosition: 'buy',
+        },
+      ]);
 
       const stats = await persistenceService.getRecentStats(24);
 
-      expect(stats).toEqual({
-        newsProcessed: 2,
-        insightsGenerated: 1,
-        contractsValidated: 1,
-      });
+      expect(stats.newsProcessed).toBe(2);
+      expect(stats.contractsMatched).toBe(1);
     });
 
     it('should filter statistics by time window', async () => {
       // Add some data
-      await persistenceService.markNewsAsProcessed('news-recent', 'Recent', 'Source');
+      await persistenceService.markNewsAsProcessed('news-recent');
 
       // Get stats for a very small time window (0.001 hours = 3.6 seconds)
       await new Promise((resolve) => setTimeout(resolve, 4000)); // Wait 4 seconds
@@ -247,24 +287,13 @@ describe('PersistenceService', () => {
       const stats = await persistenceService.getRecentStats(0.001);
 
       expect(stats.newsProcessed).toBe(0);
-    });
+    }, 10000); // 10 second timeout for this test
   });
 
   describe('cleanup', () => {
-    beforeEach(async () => {
-      await persistenceService.initialize();
-    });
-
     it('should clean up old records', async () => {
       // Add some records
-      await persistenceService.markNewsAsProcessed('news-to-clean', 'Old News', 'Source');
-      await persistenceService.markContractAsValidated(
-        'contract-old',
-        'Platform',
-        'news-to-clean',
-        0.7,
-        'SELL',
-      );
+      await persistenceService.markNewsAsProcessed('news-to-clean');
 
       // Clean up with 0 days to keep (should delete everything)
       await persistenceService.cleanup(0);
@@ -276,7 +305,7 @@ describe('PersistenceService', () => {
 
     it('should preserve recent records during cleanup', async () => {
       // Add a record
-      await persistenceService.markNewsAsProcessed('news-keep', 'Keep This', 'Source');
+      await persistenceService.markNewsAsProcessed('news-keep');
 
       // Clean up with 7 days to keep (default)
       await persistenceService.cleanup(7);
@@ -289,12 +318,14 @@ describe('PersistenceService', () => {
 
   describe('database lifecycle', () => {
     it('should handle close gracefully', async () => {
-      await persistenceService.initialize();
-      await expect(persistenceService.close()).resolves.not.toThrow();
+      const newService = new PersistenceService();
+      await newService.initialize();
+      await expect(newService.close()).resolves.not.toThrow();
     });
 
     it('should handle close when not initialized', async () => {
-      await expect(persistenceService.close()).resolves.not.toThrow();
+      const newService = new PersistenceService();
+      await expect(newService.close()).resolves.not.toThrow();
     });
   });
 });

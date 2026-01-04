@@ -98,14 +98,18 @@ interface KalshiOrderRequest {
   expiration_ts?: number;
 }
 
+// Default categories to exclude from Kalshi queries
+const DEFAULT_EXCLUDED_CATEGORIES = ['Sports', 'Crypto', 'Climate', 'Mentions'];
+
 export class KalshiPlatform implements BettingPlatform {
   name = 'kalshi';
   private apiKeyId: string = '';
   private privateKey: string = '';
-  private baseUrl: string = 'https://demo-api.kalshi.co/trade-api/v2'; // Demo is currently the only working endpoint
+  private baseUrl: string = 'https://api.elections.kalshi.com/trade-api/v2'; // Production API
   private demoUrl: string = 'https://demo-api.kalshi.co/trade-api/v2';
   private client!: AxiosInstance;
   private isDemoMode = true; // Default to demo since production endpoints are not accessible
+  private excludedCategories: Set<string> = new Set();
 
   async initialize(config: BettingPlatformConfig): Promise<void> {
     const customConfig = config.customConfig as Record<string, unknown> | undefined;
@@ -133,6 +137,13 @@ export class KalshiPlatform implements BettingPlatform {
     // Check for demo mode
     this.isDemoMode = customConfig?.demoMode === true || process.env.KALSHI_DEMO_MODE === 'true';
 
+    // Initialize excluded categories (case-insensitive matching)
+    const excludedCategoriesEnv = process.env.KALSHI_EXCLUDED_CATEGORIES;
+    const categoriesToExclude = excludedCategoriesEnv
+      ? excludedCategoriesEnv.split(',').map((c) => c.trim().toLowerCase())
+      : DEFAULT_EXCLUDED_CATEGORIES.map((c) => c.toLowerCase());
+    this.excludedCategories = new Set(categoriesToExclude);
+
     // Initialize HTTP client
     this.client = axios.create({
       baseURL: this.isDemoMode ? this.demoUrl : this.baseUrl,
@@ -152,6 +163,7 @@ export class KalshiPlatform implements BettingPlatform {
     console.log(
       `Kalshi Platform initialized with API key authentication (${this.isDemoMode ? 'DEMO' : 'LIVE'} mode)`,
     );
+    console.log(`Kalshi: excluding categories: ${Array.from(this.excludedCategories).join(', ')}`);
   }
 
   private generateJWT(method: string, path: string): string {
@@ -169,38 +181,129 @@ export class KalshiPlatform implements BettingPlatform {
     return jwt.sign(payload, this.privateKey, { algorithm: 'RS256' });
   }
 
+  private async delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   async getAvailableContracts(): Promise<Contract[]> {
-    try {
-      // Fetch all active events
-      const response = await this.client.get('/events', {
-        params: {
-          status: 'open',
-          limit: 100,
-        },
-      });
+    // First, fetch all events to get correct titles
+    // The /markets endpoint returns incomplete titles (missing person names, etc.)
+    // The /events endpoint has the complete titles
+    const eventTitles = await this.fetchAllEventTitles();
+    console.log(`Kalshi: fetched ${eventTitles.size} event titles`);
 
-      const events: KalshiEvent[] = response.data.events;
-      const contracts: Contract[] = [];
+    const contracts: Contract[] = [];
+    let cursor: string | undefined;
 
-      // Convert Kalshi markets to our Contract format
-      for (const event of events) {
-        for (const market of event.markets) {
-          if (market.status !== 'open') {
-            continue;
+    do {
+      // Rate limit: 20 req/s for basic tier, wait 100ms between requests
+      await this.delay(100);
+
+      // Retry logic with exponential backoff for rate limits
+      let response;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          response = await this.client.get('/markets', {
+            params: {
+              status: 'open',
+              limit: 200,
+              cursor,
+            },
+          });
+          break; // Success, exit retry loop
+        } catch (error) {
+          if (axios.isAxiosError(error) && error.response?.status === 429) {
+            const waitTime = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s, 8s, 16s
+            console.log(`Rate limited, waiting ${waitTime / 1000}s...`);
+            await this.delay(waitTime);
+          } else {
+            throw error;
           }
-
-          contracts.push(this.convertMarketToContract(market, event));
         }
       }
 
-      return contracts;
-    } catch (error) {
-      console.error('Failed to fetch Kalshi contracts:', error);
-      if (axios.isAxiosError(error) && error.response) {
-        console.error('Error response:', error.response.data);
+      if (!response) {
+        throw new Error('Failed to fetch markets after retries');
       }
-      throw error;
-    }
+
+      const markets: KalshiMarket[] = response.data.markets || [];
+      cursor = response.data.cursor;
+
+      // Only log every 10th page to reduce noise
+      if (contracts.length % 2000 === 0 || !cursor) {
+        console.log(`Kalshi: fetched ${contracts.length} markets so far...`);
+      }
+
+      const now = new Date();
+      for (const market of markets) {
+        // Skip markets that haven't opened yet (showing "launching in" on Kalshi)
+        const openTime = new Date(market.open_time);
+        if (openTime > now) {
+          continue;
+        }
+
+        // Skip markets in excluded categories
+        if (market.category && this.excludedCategories.has(market.category.toLowerCase())) {
+          continue;
+        }
+
+        contracts.push(this.convertMarketToContractSimple(market, eventTitles));
+      }
+    } while (cursor);
+
+    console.log(
+      `Kalshi: ${contracts.length} total contracts found (excluding: ${Array.from(this.excludedCategories).join(', ')})`,
+    );
+
+    return contracts;
+  }
+
+  /**
+   * Fetch all event titles from the /events endpoint
+   * This is needed because /markets returns incomplete titles (missing person names, etc.)
+   */
+  private async fetchAllEventTitles(): Promise<Map<string, string>> {
+    const eventTitles = new Map<string, string>();
+    let cursor: string | undefined;
+
+    do {
+      await this.delay(100);
+
+      let response;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          response = await this.client.get('/events', {
+            params: {
+              status: 'open',
+              limit: 200,
+              cursor,
+            },
+          });
+          break;
+        } catch (error) {
+          if (axios.isAxiosError(error) && error.response?.status === 429) {
+            const waitTime = Math.pow(2, attempt) * 1000;
+            console.log(`Rate limited on events, waiting ${waitTime / 1000}s...`);
+            await this.delay(waitTime);
+          } else {
+            throw error;
+          }
+        }
+      }
+
+      if (!response) {
+        throw new Error('Failed to fetch events after retries');
+      }
+
+      const events: KalshiEvent[] = response.data.events || [];
+      cursor = response.data.cursor;
+
+      for (const event of events) {
+        eventTitles.set(event.event_ticker, event.title);
+      }
+    } while (cursor);
+
+    return eventTitles;
   }
 
   async getContract(contractId: string): Promise<Contract | null> {
@@ -224,6 +327,58 @@ export class KalshiPlatform implements BettingPlatform {
     }
   }
 
+  private convertMarketToContractSimple(
+    market: KalshiMarket,
+    eventTitles: Map<string, string>,
+  ): Contract {
+    const now = new Date();
+    const closeTime = new Date(market.close_time);
+    const expirationTime = new Date(market.expiration_time);
+
+    // Calculate best prices (in cents to dollars)
+    const yesPrice = market.yes_ask ? market.yes_ask / 100 : 0.5;
+    const noPrice = market.no_ask ? market.no_ask / 100 : 0.5;
+
+    // Use event_ticker for URL - Kalshi's /events/{event_ticker} format works
+    const eventTicker = market.event_ticker || market.ticker;
+
+    // Contract title should describe the specific outcome, not the market question
+    // Use yes_sub_title if available (e.g., "Loyola Marymount"), otherwise fall back to market title
+    const contractTitle = market.yes_sub_title || market.title;
+
+    // Use event title for marketTitle (it has the complete text, including person names)
+    // Fall back to market.title if event title not found
+    const marketTitle = eventTitles.get(market.event_ticker) || market.title;
+
+    return {
+      id: market.ticker,
+      platform: 'kalshi',
+      title: contractTitle,
+      yesPrice,
+      noPrice,
+      volume: market.volume,
+      liquidity: market.liquidity,
+      endDate: expirationTime,
+      tags: [market.category, market.market_type].filter(Boolean),
+      url: `https://kalshi.com/events/${eventTicker}`,
+      metadata: {
+        eventTicker: market.event_ticker,
+        marketTicker: market.ticker,
+        marketTitle, // Event title (complete) for deriving market-level title
+        yesSubTitle: market.yes_sub_title,
+        noSubTitle: market.no_sub_title,
+        volume24h: market.volume_24h,
+        openInterest: market.open_interest,
+        lastPrice: market.last_price / 100,
+        yesBid: market.yes_bid / 100,
+        noBid: market.no_bid / 100,
+        canCloseEarly: market.can_close_early,
+        riskLimitCents: market.risk_limit_cents,
+        isOpen: market.status === 'open' && closeTime > now,
+      },
+    };
+  }
+
   private convertMarketToContract(market: KalshiMarket, event: KalshiEvent): Contract {
     const now = new Date();
     const closeTime = new Date(market.close_time);
@@ -233,20 +388,23 @@ export class KalshiPlatform implements BettingPlatform {
     const yesPrice = market.yes_ask ? market.yes_ask / 100 : 0.5;
     const noPrice = market.no_ask ? market.no_ask / 100 : 0.5;
 
+    // Contract title should describe the specific outcome, not the market question
+    const contractTitle = market.yes_sub_title || market.title;
+
     return {
       id: market.ticker,
       platform: 'kalshi',
-      title: market.title,
-      description: `${event.title}: ${market.subtitle}`,
+      title: contractTitle,
       yesPrice,
       noPrice,
       volume: market.volume,
       liquidity: market.liquidity,
       endDate: expirationTime,
       tags: [event.category, market.market_type],
-      url: `https://kalshi.com/markets/${market.ticker}`,
+      url: `https://kalshi.com/events/${event.event_ticker}`,
       metadata: {
         eventTicker: event.event_ticker,
+        marketTicker: market.ticker,
         seriesTicker: event.series_ticker,
         yesSubTitle: market.yes_sub_title,
         noSubTitle: market.no_sub_title,

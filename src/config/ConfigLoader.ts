@@ -1,6 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { AppConfig, ServiceConfig, AlertConfig, AlertType } from './types';
+import {
+  AppConfig,
+  ServiceConfig,
+  AlertConfig,
+  AlertType,
+  BetSyncConfig,
+  BetMatchingConfig,
+  EmbeddingProviderConfig,
+} from './types';
 import {
   NewsServicePlugin,
   BettingPlatformPlugin,
@@ -28,6 +36,45 @@ export class ConfigLoader {
       .split(',')
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
+  }
+
+  private static parseBetSyncConfig(): BetSyncConfig {
+    return {
+      syncIntervalMs: parseInt(process.env.BET_SYNC_INTERVAL_MS || '300000'), // 5 minutes default
+      embeddingBatchSize: parseInt(process.env.EMBEDDING_BATCH_SIZE || '100'),
+    };
+  }
+
+  private static parseBetMatchingConfig(): BetMatchingConfig {
+    const config: BetMatchingConfig = {
+      topN: parseInt(process.env.TOP_MATCHING_BETS || '50'),
+    };
+
+    if (process.env.MIN_SIMILARITY_SCORE) {
+      config.minSimilarity = parseFloat(process.env.MIN_SIMILARITY_SCORE);
+    }
+
+    return config;
+  }
+
+  private static parseEmbeddingConfig(): EmbeddingProviderConfig {
+    // Try to get Gemini API key from various sources
+    const apiKey =
+      process.env.EMBEDDING_API_KEY ||
+      process.env.GEMINI_API_KEY ||
+      process.env.LLM_GEMINI_APIKEY ||
+      '';
+
+    return {
+      apiKey,
+      model: process.env.EMBEDDING_MODEL || 'text-embedding-004',
+      batchSize: process.env.EMBEDDING_BATCH_SIZE
+        ? parseInt(process.env.EMBEDDING_BATCH_SIZE)
+        : 100,
+      requestDelayMs: process.env.EMBEDDING_REQUEST_DELAY_MS
+        ? parseInt(process.env.EMBEDDING_REQUEST_DELAY_MS)
+        : 100,
+    };
   }
 
   private static parseAlertConfig(): AlertConfig {
@@ -180,8 +227,12 @@ export class ConfigLoader {
         dryRun: process.env.DRY_RUN !== 'false',
         placeBets: process.env.PLACE_BETS === 'true', // Default to false for safety
       },
+      betSync: this.parseBetSyncConfig(),
+      betMatching: this.parseBetMatchingConfig(),
+      embedding: this.parseEmbeddingConfig(),
       alerts: this.parseAlertConfig(),
       logLevel: process.env.LOG_LEVEL || 'info',
+      useV2Orchestrator: process.env.USE_V2_ORCHESTRATOR !== 'false', // Default to V2 (embedding-based)
     };
   }
 

@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "prisma generate && tsc",
     "start": "node dist/index.js",
     "lint": "eslint 'src/**/*.ts'",
     "lint:fix": "eslint 'src/**/*.ts' --fix",
@@ -13,7 +13,14 @@
     "check": "npm run typecheck && npm run lint",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "postinstall": "prisma generate",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate:prod": "prisma migrate deploy",
+    "prisma:push": "prisma db push",
+    "prisma:studio": "prisma studio",
+    "prisma:reset": "prisma migrate reset"
   },
   "keywords": [],
   "author": "",
@@ -37,17 +44,15 @@
     "typescript-eslint": "^8.42.0"
   },
   "dependencies": {
+    "@prisma/client": "^6.19.1",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/nodemailer": "^7.0.1",
-    "@types/sqlite3": "^3.1.11",
     "axios": "^1.11.0",
     "dotenv": "^17.2.2",
     "ethers": "^6.15.0",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "^7.0.6",
-    "reflect-metadata": "^0.2.2",
-    "sqlite3": "^5.1.7",
-    "typeorm": "^0.3.27",
+    "prisma": "^6.19.1",
     "winston": "^3.17.0"
   }
 }

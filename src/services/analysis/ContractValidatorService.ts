@@ -6,43 +6,106 @@ import {
   LLMProvider,
 } from '../../types';
 
+interface LLMValidationResponse {
+  isRelevant: boolean;
+  relevanceScore: number;
+  matchedEntities: string[];
+  matchedEvents: string[];
+  reasoning: string;
+  suggestedPosition: 'buy' | 'sell' | 'hold';
+  confidence: number;
+  risks: string[];
+  opportunities: string[];
+}
+
+interface BatchValidationResponse {
+  contractId: string;
+  isRelevant: boolean;
+  relevanceScore: number;
+  matchedEntities: string[];
+  matchedEvents: string[];
+  reasoning: string;
+  suggestedPosition: 'buy' | 'sell' | 'hold';
+  confidence: number;
+  risks: string[];
+  opportunities: string[];
+}
+
 export class ContractValidatorService implements ContractValidator {
   async validateContract(
     contract: Contract,
     newsInsight: ParsedNewsInsight,
     llmProvider: LLMProvider,
   ): Promise<ContractValidation> {
-    const systemPrompt = `You are a prediction market analyst. Determine if a betting contract is relevant to a news event.
-Analyze the connection between news insights and contract terms. Be precise about relevance and risk assessment.`;
+    const systemPrompt = `You are a prediction market analyst. Analyze betting contracts against news events.
+You must respond with valid JSON matching the exact structure provided. Be precise about relevance and risk assessment.`;
 
-    const prompt = `Analyze if this contract matches the news insight:
+    const marketTitle = (contract.metadata?.marketTitle as string) || contract.title;
+    const similarity = contract.metadata?.similarity as number | undefined;
 
-CONTRACT:
+    const prompt = `Analyze if this betting contract is relevant to the news and worth betting on.
+
+MARKET QUESTION: ${marketTitle}
+${similarity ? `(Semantic similarity to news: ${(similarity * 100).toFixed(1)}%)` : ''}
+
+CONTRACT OPTION:
+ID: ${contract.id}
 Title: ${contract.title}
-Description: ${contract.description}
-Yes Price: ${contract.yesPrice}
-No Price: ${contract.noPrice}
-Expires: ${contract.endDate}
+Yes Price: ${(contract.yesPrice * 100).toFixed(0)}% (cost to bet YES)
+No Price: ${(contract.noPrice * 100).toFixed(0)}% (cost to bet NO)
+Expires: ${contract.endDate ? new Date(contract.endDate).toISOString().split('T')[0] : 'Unknown'}
+Volume: ${contract.volume || 'Unknown'}
 
 NEWS INSIGHT:
 Summary: ${newsInsight.summary}
-Entities: ${newsInsight.entities.map((e) => e.name).join(', ')}
-Events: ${newsInsight.events.map((e) => e.description).join(', ')}
-Predictions: ${newsInsight.predictions.map((p) => p.outcome).join(', ')}
-Suggested Actions: ${newsInsight.suggestedActions.map((a) => a.description).join(', ')}
+Entities: ${newsInsight.entities.map((e) => `${e.name} (${e.type})`).join(', ') || 'None'}
+Events: ${newsInsight.events.map((e) => `${e.description} (${e.impact} impact)`).join(', ') || 'None'}
+Predictions: ${newsInsight.predictions.map((p) => `${p.outcome} (${(p.probability * 100).toFixed(0)}% likely)`).join(', ') || 'None'}
+Sentiment: ${newsInsight.sentiment.overall > 0 ? 'Positive' : newsInsight.sentiment.overall < 0 ? 'Negative' : 'Neutral'} (${newsInsight.sentiment.overall.toFixed(2)})
 
-Determine:
-1. Is this contract relevant to the news? (yes/no and why)
-2. Relevance score (0-1)
-3. Which entities/events match?
-4. Suggested position (buy/sell/hold)
-5. Confidence level
-6. Key risks
-7. Opportunities`;
+Respond with this exact JSON structure:
+{
+  "isRelevant": true/false,
+  "relevanceScore": 0.0-1.0,
+  "matchedEntities": ["entity names from news that appear in contract"],
+  "matchedEvents": ["events from news that relate to contract"],
+  "reasoning": "2-3 sentences explaining the connection or lack thereof",
+  "suggestedPosition": "buy" | "sell" | "hold",
+  "confidence": 0.0-1.0,
+  "risks": ["risk 1", "risk 2"],
+  "opportunities": ["opportunity 1", "opportunity 2"]
+}
 
-    const analysis = await llmProvider.generateCompletion(prompt, systemPrompt);
+Guidelines:
+- isRelevant: true if the contract directly relates to entities/events in the news
+- relevanceScore: how strongly the news impacts this specific contract (0=unrelated, 1=direct impact)
+- suggestedPosition: "buy" if news suggests YES outcome more likely than current price implies, "sell" if NO more likely, "hold" if uncertain or fairly priced
+- confidence: how confident you are in the suggested position (consider news reliability, time to expiry, market efficiency)
+- Focus on actionable insights - is this a good bet given the news?
 
-    return this.parseValidationResponse(contract, newsInsight, analysis);
+Return ONLY valid JSON, no additional text.`;
+
+    try {
+      const analysis = await llmProvider.generateCompletion(prompt, systemPrompt);
+      const parsed = this.parseJSONResponse(analysis);
+
+      return {
+        contractId: contract.id,
+        newsInsightId: newsInsight.originalNewsId,
+        isRelevant: parsed.isRelevant,
+        relevanceScore: this.clamp(parsed.relevanceScore, 0, 1),
+        matchedEntities: parsed.matchedEntities || [],
+        matchedEvents: parsed.matchedEvents || [],
+        reasoning: parsed.reasoning || '',
+        suggestedPosition: this.validatePosition(parsed.suggestedPosition),
+        suggestedConfidence: this.clamp(parsed.confidence, 0, 1),
+        risks: parsed.risks || [],
+        opportunities: parsed.opportunities || [],
+      };
+    } catch (error) {
+      console.error('Error validating contract with LLM:', error);
+      return this.createFallbackValidation(contract, newsInsight);
+    }
   }
 
   async batchValidateContracts(
@@ -50,22 +113,270 @@ Determine:
     newsInsight: ParsedNewsInsight,
     llmProvider: LLMProvider,
   ): Promise<ContractValidation[]> {
-    const validations = await Promise.all(
-      contracts.map((contract) => this.validateContract(contract, newsInsight, llmProvider)),
-    );
+    if (contracts.length === 0) {
+      return [];
+    }
 
-    return validations.sort((a, b) => b.relevanceScore - a.relevanceScore);
+    // For small batches, process in a single LLM call
+    if (contracts.length <= 10) {
+      return this.validateContractsInSingleRequest(contracts, newsInsight, llmProvider);
+    }
+
+    // For larger batches, chunk into groups of 10
+    const results: ContractValidation[] = [];
+    const batchSize = 10;
+
+    for (let i = 0; i < contracts.length; i += batchSize) {
+      const batch = contracts.slice(i, i + batchSize);
+      try {
+        const batchResults = await this.validateContractsInSingleRequest(
+          batch,
+          newsInsight,
+          llmProvider,
+        );
+        results.push(...batchResults);
+      } catch (error) {
+        console.error(`Batch validation failed, falling back to individual:`, error);
+        // Fallback to individual validation
+        for (const contract of batch) {
+          const validation = await this.validateContract(contract, newsInsight, llmProvider);
+          results.push(validation);
+        }
+      }
+    }
+
+    return results.sort((a, b) => b.relevanceScore - a.relevanceScore);
   }
 
-  private parseValidationResponse(
+  private async validateContractsInSingleRequest(
+    contracts: Contract[],
+    newsInsight: ParsedNewsInsight,
+    llmProvider: LLMProvider,
+  ): Promise<ContractValidation[]> {
+    const systemPrompt = `You are a prediction market analyst. Analyze multiple betting contracts against a single news event.
+You must respond with a JSON array where each element matches the exact structure provided.`;
+
+    const contractsList = contracts
+      .map((c, i) => {
+        const marketTitle = (c.metadata?.marketTitle as string) || c.title;
+        const similarity = c.metadata?.similarity as number | undefined;
+        return `[CONTRACT ${i + 1}]
+ID: ${c.id}
+Market: ${marketTitle}${similarity ? ` (${(similarity * 100).toFixed(0)}% similar)` : ''}
+Option: ${c.title}
+Yes: ${(c.yesPrice * 100).toFixed(0)}% / No: ${(c.noPrice * 100).toFixed(0)}%
+Expires: ${c.endDate ? new Date(c.endDate).toISOString().split('T')[0] : 'Unknown'}`;
+      })
+      .join('\n\n');
+
+    const prompt = `Analyze these ${contracts.length} betting contracts against the news insight.
+
+NEWS INSIGHT:
+Summary: ${newsInsight.summary}
+Entities: ${newsInsight.entities.map((e) => `${e.name} (${e.type})`).join(', ') || 'None'}
+Events: ${newsInsight.events.map((e) => `${e.description} (${e.impact} impact)`).join(', ') || 'None'}
+Predictions: ${newsInsight.predictions.map((p) => `${p.outcome} (${(p.probability * 100).toFixed(0)}% likely)`).join(', ') || 'None'}
+Sentiment: ${newsInsight.sentiment.overall > 0 ? 'Positive' : newsInsight.sentiment.overall < 0 ? 'Negative' : 'Neutral'}
+
+CONTRACTS TO ANALYZE:
+${contractsList}
+
+Return a JSON array with ${contracts.length} objects, one per contract, in order:
+[
+  {
+    "contractId": "the contract ID",
+    "isRelevant": true/false,
+    "relevanceScore": 0.0-1.0,
+    "matchedEntities": ["matched entity names"],
+    "matchedEvents": ["matched events"],
+    "reasoning": "brief explanation",
+    "suggestedPosition": "buy" | "sell" | "hold",
+    "confidence": 0.0-1.0,
+    "risks": ["risk factors"],
+    "opportunities": ["opportunities"]
+  }
+]
+
+Guidelines:
+- Only mark contracts as relevant if they DIRECTLY relate to the news
+- suggestedPosition: "buy" YES if news makes YES more likely than price suggests, "sell" (buy NO) if opposite, "hold" if uncertain
+- Be selective - most contracts won't be relevant to any given news item
+
+Return ONLY the JSON array, no additional text.`;
+
+    try {
+      const analysis = await llmProvider.generateCompletion(prompt, systemPrompt);
+      const parsedArray = this.parseBatchJSONResponse(analysis);
+
+      // Map parsed results to ContractValidation objects
+      const validations: ContractValidation[] = [];
+
+      for (let i = 0; i < contracts.length; i++) {
+        const contract = contracts[i];
+        const parsed = parsedArray[i] || this.createEmptyResponse(contract.id);
+
+        // Verify contract ID matches (or use position if IDs don't match)
+        if (parsed.contractId && parsed.contractId !== contract.id) {
+          console.warn(
+            `Contract ID mismatch at position ${i}: expected ${contract.id}, got ${parsed.contractId}`,
+          );
+        }
+
+        validations.push({
+          contractId: contract.id,
+          newsInsightId: newsInsight.originalNewsId,
+          isRelevant: parsed.isRelevant ?? false,
+          relevanceScore: this.clamp(parsed.relevanceScore ?? 0, 0, 1),
+          matchedEntities: parsed.matchedEntities || [],
+          matchedEvents: parsed.matchedEvents || [],
+          reasoning: parsed.reasoning || '',
+          suggestedPosition: this.validatePosition(parsed.suggestedPosition),
+          suggestedConfidence: this.clamp(parsed.confidence ?? 0, 0, 1),
+          risks: parsed.risks || [],
+          opportunities: parsed.opportunities || [],
+        });
+      }
+
+      return validations;
+    } catch (error) {
+      console.error('Batch validation parsing failed:', error);
+      throw error;
+    }
+  }
+
+  private parseJSONResponse(response: string): LLMValidationResponse {
+    let jsonStr = response.trim();
+
+    // Handle markdown code blocks
+    const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[1].trim();
+    }
+
+    // Find JSON object boundaries
+    const jsonStart = jsonStr.indexOf('{');
+    const jsonEnd = jsonStr.lastIndexOf('}');
+    if (jsonStart !== -1 && jsonEnd !== -1) {
+      jsonStr = jsonStr.substring(jsonStart, jsonEnd + 1);
+    }
+
+    try {
+      return JSON.parse(jsonStr) as LLMValidationResponse;
+    } catch (error) {
+      console.error('Failed to parse validation JSON:', error);
+      console.error('Response was:', jsonStr.substring(0, 500));
+      throw error;
+    }
+  }
+
+  private parseBatchJSONResponse(response: string): BatchValidationResponse[] {
+    let jsonStr = response.trim();
+
+    // Handle markdown code blocks
+    const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[1].trim();
+    }
+
+    // Find array boundaries
+    const arrayStart = jsonStr.indexOf('[');
+    if (arrayStart === -1) {
+      console.error('No JSON array found in batch response');
+      return [];
+    }
+
+    // Find matching closing bracket
+    let depth = 0;
+    let arrayEnd = -1;
+    let inString = false;
+    let escapeNext = false;
+
+    for (let i = arrayStart; i < jsonStr.length; i++) {
+      const char = jsonStr[i];
+
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+
+      if (char === '\\') {
+        escapeNext = true;
+        continue;
+      }
+
+      if (char === '"' && !escapeNext) {
+        inString = !inString;
+        continue;
+      }
+
+      if (!inString) {
+        if (char === '[' || char === '{') {
+          depth++;
+        } else if (char === ']' || char === '}') {
+          depth--;
+          if (depth === 0 && char === ']') {
+            arrayEnd = i;
+            break;
+          }
+        }
+      }
+    }
+
+    if (arrayEnd === -1) {
+      console.error('Malformed JSON array - no matching closing bracket');
+      return [];
+    }
+
+    jsonStr = jsonStr.substring(arrayStart, arrayEnd + 1);
+
+    try {
+      const parsed = JSON.parse(jsonStr);
+      if (!Array.isArray(parsed)) {
+        console.error('Batch response is not an array');
+        return [];
+      }
+      return parsed;
+    } catch (error) {
+      console.error('Failed to parse batch validation JSON:', error);
+      console.error('Attempted to parse:', jsonStr.substring(0, 500));
+      return [];
+    }
+  }
+
+  private createEmptyResponse(contractId: string): BatchValidationResponse {
+    return {
+      contractId,
+      isRelevant: false,
+      relevanceScore: 0,
+      matchedEntities: [],
+      matchedEvents: [],
+      reasoning: 'Failed to parse LLM response',
+      suggestedPosition: 'hold',
+      confidence: 0,
+      risks: ['Analysis failed'],
+      opportunities: [],
+    };
+  }
+
+  private createFallbackValidation(
     contract: Contract,
     newsInsight: ParsedNewsInsight,
-    analysis: string,
   ): ContractValidation {
-    const isRelevant = this.checkRelevance(contract, newsInsight, analysis);
-    const relevanceScore = this.calculateRelevanceScore(contract, newsInsight, analysis);
-    const matchedEntities = this.findMatchedEntities(contract, newsInsight);
-    const matchedEvents = this.findMatchedEvents(contract, newsInsight);
+    // Basic fallback using simple text matching
+    const contractText = contract.title.toLowerCase();
+    const matchedEntities = newsInsight.entities
+      .filter((e) => contractText.includes(e.name.toLowerCase()))
+      .map((e) => e.name);
+
+    const matchedEvents = newsInsight.events
+      .filter((e) => {
+        const words = e.description.toLowerCase().split(' ');
+        return words.some((w) => w.length > 4 && contractText.includes(w));
+      })
+      .map((e) => e.description);
+
+    const isRelevant = matchedEntities.length > 0 || matchedEvents.length > 0;
+    const relevanceScore = Math.min(matchedEntities.length * 0.3 + matchedEvents.length * 0.2, 1.0);
 
     return {
       contractId: contract.id,
@@ -74,201 +385,25 @@ Determine:
       relevanceScore,
       matchedEntities,
       matchedEvents,
-      reasoning: this.extractReasoning(analysis),
-      suggestedPosition: this.determineSuggestedPosition(contract, newsInsight, analysis),
-      suggestedConfidence: this.calculateConfidence(
-        relevanceScore,
-        matchedEntities.length,
-        matchedEvents.length,
-      ),
-      risks: this.identifyRisks(contract, newsInsight, analysis),
-      opportunities: this.identifyOpportunities(contract, newsInsight, analysis),
+      reasoning: 'Fallback analysis based on keyword matching',
+      suggestedPosition: 'hold',
+      suggestedConfidence: relevanceScore * 0.5,
+      risks: ['Analysis performed using fallback method - lower confidence'],
+      opportunities: [],
     };
   }
 
-  private checkRelevance(
-    contract: Contract,
-    newsInsight: ParsedNewsInsight,
-    analysis: string,
-  ): boolean {
-    const contractText = `${contract.title} ${contract.description}`.toLowerCase();
-
-    for (const entity of newsInsight.entities) {
-      if (contractText.includes(entity.name.toLowerCase())) {
-        return true;
-      }
+  private validatePosition(position: unknown): 'buy' | 'sell' | 'hold' {
+    if (position === 'buy' || position === 'sell' || position === 'hold') {
+      return position;
     }
-
-    for (const event of newsInsight.events) {
-      const eventWords = event.description.toLowerCase().split(' ');
-      if (eventWords.some((word) => contractText.includes(word))) {
-        return true;
-      }
-    }
-
-    if (
-      analysis.toLowerCase().includes('relevant') &&
-      !analysis.toLowerCase().includes('not relevant')
-    ) {
-      return true;
-    }
-
-    return false;
-  }
-
-  private calculateRelevanceScore(
-    contract: Contract,
-    newsInsight: ParsedNewsInsight,
-    analysis: string,
-  ): number {
-    let score = 0;
-    const contractText = `${contract.title} ${contract.description}`.toLowerCase();
-
-    newsInsight.entities.forEach((entity) => {
-      if (contractText.includes(entity.name.toLowerCase())) {
-        score += 0.3 * entity.confidence;
-      }
-    });
-
-    newsInsight.events.forEach((event) => {
-      if (contractText.includes(event.type)) {
-        score += 0.2;
-      }
-    });
-
-    newsInsight.suggestedActions.forEach((action) => {
-      if (
-        action.relatedMarketQuery &&
-        contractText.includes(action.relatedMarketQuery.toLowerCase())
-      ) {
-        score += 0.2 * action.confidence;
-      }
-    });
-
-    if (analysis.includes('highly relevant')) {
-      score += 0.2;
-    }
-    if (analysis.includes('direct correlation')) {
-      score += 0.15;
-    }
-
-    return Math.min(score, 1.0);
-  }
-
-  private findMatchedEntities(contract: Contract, newsInsight: ParsedNewsInsight): string[] {
-    const contractText = `${contract.title} ${contract.description}`.toLowerCase();
-    return newsInsight.entities
-      .filter((entity) => contractText.includes(entity.name.toLowerCase()))
-      .map((entity) => entity.name);
-  }
-
-  private findMatchedEvents(contract: Contract, newsInsight: ParsedNewsInsight): string[] {
-    const contractText = `${contract.title} ${contract.description}`.toLowerCase();
-    return newsInsight.events
-      .filter((event) => {
-        const eventWords = event.description.toLowerCase().split(' ');
-        return eventWords.some((word) => word.length > 3 && contractText.includes(word));
-      })
-      .map((event) => event.description);
-  }
-
-  private extractReasoning(analysis: string): string {
-    if (analysis.includes('relevant')) {
-      const sentences = analysis.split('.');
-      const relevantSentence = sentences.find((s) => s.includes('relevant')) || '';
-      return relevantSentence.trim();
-    }
-    return 'Contract relevance determined by entity and event matching';
-  }
-
-  private determineSuggestedPosition(
-    contract: Contract,
-    newsInsight: ParsedNewsInsight,
-    analysis: string,
-  ): 'buy' | 'sell' | 'hold' {
-    // Check if sentiment aligns with underpriced outcomes
-    if (newsInsight.sentiment.overall > 0.3 && contract.yesPrice < 0.6) {
-      return 'buy';
-    }
-    if (newsInsight.sentiment.overall < -0.3 && contract.noPrice < 0.6) {
-      return 'buy';
-    }
-
-    if (analysis.toLowerCase().includes('buy')) {
-      return 'buy';
-    }
-    if (analysis.toLowerCase().includes('sell')) {
-      return 'sell';
-    }
-
     return 'hold';
   }
 
-  private calculateConfidence(
-    relevanceScore: number,
-    entityMatches: number,
-    eventMatches: number,
-  ): number {
-    let confidence = relevanceScore * 0.5;
-    confidence += Math.min(entityMatches * 0.15, 0.3);
-    confidence += Math.min(eventMatches * 0.1, 0.2);
-    return Math.min(confidence, 1.0);
-  }
-
-  private identifyRisks(
-    contract: Contract,
-    newsInsight: ParsedNewsInsight,
-    analysis: string,
-  ): string[] {
-    const risks: string[] = [];
-
-    if (
-      contract.endDate &&
-      new Date(contract.endDate) < new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-    ) {
-      risks.push('Contract expires soon - limited time for resolution');
+  private clamp(value: number, min: number, max: number): number {
+    if (typeof value !== 'number' || isNaN(value)) {
+      return min;
     }
-
-    if (contract.volume && contract.volume < 10000) {
-      risks.push('Low trading volume - potential liquidity issues');
-    }
-
-    if (newsInsight.predictions.some((p) => p.confidence < 0.5)) {
-      risks.push('Low confidence in news-based predictions');
-    }
-
-    if (analysis.includes('risk') || analysis.includes('uncertain')) {
-      risks.push('Analysis indicates uncertainty in outcome');
-    }
-
-    return risks;
-  }
-
-  private identifyOpportunities(
-    contract: Contract,
-    newsInsight: ParsedNewsInsight,
-    _analysis: string,
-  ): string[] {
-    const opportunities: string[] = [];
-
-    if (contract.yesPrice < 0.3 && newsInsight.sentiment.overall > 0.5) {
-      opportunities.push('Contract underpriced relative to positive sentiment');
-    }
-
-    if (contract.yesPrice > 0.7 && newsInsight.sentiment.overall < -0.3) {
-      opportunities.push('Contract overpriced relative to negative sentiment');
-    }
-
-    if (newsInsight.suggestedActions.some((a) => a.urgency === 'high')) {
-      opportunities.push('High urgency news event - potential for quick movement');
-    }
-
-    // Check for price volatility if we have previous price data in metadata
-    const previousPrice = contract.metadata?.previousPrice as number | undefined;
-    if (previousPrice && Math.abs(contract.yesPrice - previousPrice) > 0.1) {
-      opportunities.push('Recent price volatility - opportunity for momentum trading');
-    }
-
-    return opportunities;
+    return Math.max(min, Math.min(max, value));
   }
 }
