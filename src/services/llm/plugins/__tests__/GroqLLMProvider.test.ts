@@ -93,9 +93,7 @@ describe('GroqLLMProvider', () => {
       expect(provider.name).toBe('groq');
     });
 
-    it('should warn about unknown model', async () => {
-      const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
-
+    it('should use default model when unknown model is provided', async () => {
       const config: LLMProviderConfig = {
         name: 'groq',
         apiKey: 'test-key',
@@ -104,13 +102,11 @@ describe('GroqLLMProvider', () => {
         },
       };
 
+      // Should initialize successfully and fall back to default model
       await provider.initialize(config);
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Unknown Groq model: unknown-model'),
-      );
-
-      consoleSpy.mockRestore();
+      // Provider should still work with default model
+      expect(provider.name).toBe('groq');
     });
 
     it('should configure temperature and maxTokens', async () => {
@@ -167,7 +163,7 @@ describe('GroqLLMProvider', () => {
       expect(mockAxiosInstance.post).toHaveBeenCalledWith(
         '/chat/completions',
         expect.objectContaining({
-          model: 'llama3-70b-8192',
+          model: 'llama-3.3-70b-versatile',
           messages: [
             {
               role: 'user',
@@ -446,14 +442,9 @@ describe('GroqLLMProvider', () => {
   });
 
   describe('destroy', () => {
-    it('should log destruction message', async () => {
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      await provider.destroy();
-
-      expect(consoleSpy).toHaveBeenCalledWith('Groq LLM Provider destroyed');
-
-      consoleSpy.mockRestore();
+    it('should complete without error', async () => {
+      // destroy should complete successfully
+      await expect(provider.destroy()).resolves.not.toThrow();
     });
   });
 

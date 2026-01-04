@@ -10,6 +10,8 @@ import {
   Position,
   MarketResolution,
 } from '../../../types';
+import { RateLimiter, withRateLimit } from '../../../utils/rateLimiter';
+import { createLogger, Logger } from '../../../utils/logger';
 
 interface PolymarketMarket {
   id: string;
@@ -36,21 +38,6 @@ interface PolymarketMarket {
   resolvedOutcome?: string;
 }
 
-// Commented out - may be used for future order book features
-// interface PolymarketOrderBook {
-//   market: string;
-//   asset_id: string;
-//   bids: Array<{
-//     price: string;
-//     size: string;
-//   }>;
-//   asks: Array<{
-//     price: string;
-//     size: string;
-//   }>;
-//   timestamp: number;
-// }
-
 interface PolymarketOrder {
   id: string;
   market: string;
@@ -75,14 +62,6 @@ interface PolymarketPosition {
   unrealized_pnl: string;
 }
 
-// Commented out - may be used for future CLOB integration
-// interface ClobClient {
-//   apiKey: string;
-//   secret: string;
-//   host: string;
-//   chainId: number;
-// }
-
 export class PolymarketPlatform implements BettingPlatform {
   name = 'polymarket';
   private apiKey: string = '';
@@ -94,6 +73,12 @@ export class PolymarketPlatform implements BettingPlatform {
   private dataClient!: AxiosInstance;
   private wallet: ethers.Wallet | null = null;
   private address: string = '';
+  private rateLimiter!: RateLimiter;
+  private logger: Logger;
+
+  constructor() {
+    this.logger = createLogger('Polymarket');
+  }
 
   async initialize(config: BettingPlatformConfig): Promise<void> {
     const customConfig = config.customConfig as Record<string, unknown> | undefined;
@@ -110,16 +95,12 @@ export class PolymarketPlatform implements BettingPlatform {
       (customConfig?.privateKey as string) || process.env.POLYMARKET_PRIVATE_KEY || '';
 
     if (!this.apiKey || !this.apiSecret) {
-      console.warn(
-        'Polymarket API credentials not provided. Running in read-only mode. ' +
-          'To place orders, set POLYMARKET_API_KEY and POLYMARKET_API_SECRET in .env.',
-      );
+      this.logger.warn('API credentials not provided, running in read-only mode');
     }
 
     if (!this.privateKey && this.apiKey && this.apiSecret) {
       throw new Error(
-        'Polymarket private key required for trading. Set POLYMARKET_PRIVATE_KEY in .env. ' +
-          'This should be your Ethereum wallet private key that holds USDC on Polygon.',
+        'Polymarket private key required for trading. Set POLYMARKET_PRIVATE_KEY in .env.',
       );
     }
 
@@ -127,8 +108,19 @@ export class PolymarketPlatform implements BettingPlatform {
     if (this.privateKey) {
       this.wallet = new ethers.Wallet(this.privateKey);
       this.address = this.wallet.address;
-      console.log(`Polymarket wallet address: ${this.address}`);
+      this.logger.info('Wallet configured', { address: this.address });
     }
+
+    // Initialize rate limiter (conservative defaults for Polymarket)
+    this.rateLimiter = new RateLimiter(
+      {
+        minDelayMs: 200,
+        requestsPerMinute: 120,
+        maxRetries: 3,
+        baseBackoffMs: 1000,
+      },
+      'Polymarket',
+    );
 
     // Initialize HTTP clients
     this.client = axios.create({
@@ -153,57 +145,63 @@ export class PolymarketPlatform implements BettingPlatform {
       this.client.defaults.headers.common['X-Api-Secret'] = this.apiSecret;
     }
 
-    console.log(
-      `Polymarket Platform initialized ${this.apiKey ? '(authenticated)' : '(read-only)'}`,
-    );
+    this.logger.info('Platform initialized', {
+      mode: this.apiKey ? 'authenticated' : 'read-only',
+    });
   }
 
   async getAvailableContracts(): Promise<Contract[]> {
     try {
-      // Fetch active markets
-      const response = await this.dataClient.get('/markets', {
-        params: {
-          active: true,
-          closed: false,
-          limit: 100,
-          order: 'volume24hr',
-          ascending: false,
-        },
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.dataClient.get('/markets', {
+          params: {
+            active: true,
+            closed: false,
+            limit: 100,
+            order: 'volume24hr',
+            ascending: false,
+          },
+        }),
+      );
 
       const markets: PolymarketMarket[] = response.data;
       const contracts: Contract[] = [];
 
       for (const market of markets) {
-        // Skip resolved markets
         if (market.resolved) {
           continue;
         }
-
         contracts.push(this.convertMarketToContract(market));
       }
 
+      this.logger.info('Fetched contracts', { count: contracts.length });
       return contracts;
     } catch (error) {
-      console.error('Failed to fetch Polymarket contracts:', error);
+      this.logger.error('Failed to fetch contracts', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
   }
 
   async getContract(contractId: string): Promise<Contract | null> {
     try {
-      const response = await this.dataClient.get(`/markets/${contractId}`);
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.dataClient.get(`/markets/${contractId}`),
+      );
       const market: PolymarketMarket = response.data;
 
       return this.convertMarketToContract(market);
     } catch (error) {
-      console.error(`Failed to fetch Polymarket contract ${contractId}:`, error);
+      this.logger.error('Failed to fetch contract', {
+        contractId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
   }
 
   private convertMarketToContract(market: PolymarketMarket): Contract {
-    // Parse outcome prices (they come as strings)
     const prices = market.outcomePrices.map((p) => parseFloat(p));
     const yesPrice = prices[0] || 0.5;
     const noPrice = prices[1] || 0.5;
@@ -237,48 +235,54 @@ export class PolymarketPlatform implements BettingPlatform {
   }
 
   async placeOrder(order: Order): Promise<OrderStatus> {
+    if (!this.apiKey || !this.apiSecret || !this.wallet) {
+      throw new Error('Polymarket trading requires API credentials and private key');
+    }
+
+    const market = await this.getContract(order.contractId);
+    if (!market) {
+      throw new Error(`Market ${order.contractId} not found`);
+    }
+
+    const clobTokenIds = market.metadata?.clobTokenIds as string[] | undefined;
+    const tokenId = clobTokenIds?.[order.side === 'yes' ? 0 : 1];
+    if (!tokenId) {
+      throw new Error(`Token ID not found for ${order.side} side of market ${order.contractId}`);
+    }
+
+    const orderPayload = {
+      market: order.contractId,
+      asset_id: tokenId,
+      side: 'BUY',
+      size: order.quantity.toString(),
+      price: (order.limitPrice || market.yesPrice).toString(),
+      type: order.orderType === 'market' ? 'MARKET' : 'LIMIT',
+      client_order_id: `ancf_${Date.now()}`,
+    };
+
+    const signature = await this.signOrder(orderPayload);
+
+    this.logger.info('Placing order', {
+      contractId: order.contractId,
+      side: order.side,
+      quantity: order.quantity,
+    });
+
     try {
-      if (!this.apiKey || !this.apiSecret || !this.wallet) {
-        throw new Error('Polymarket trading requires API credentials and private key');
-      }
-
-      // Get market details to find the correct token ID
-      const market = await this.getContract(order.contractId);
-      if (!market) {
-        throw new Error(`Market ${order.contractId} not found`);
-      }
-
-      const clobTokenIds = market.metadata?.clobTokenIds as string[] | undefined;
-      const tokenId = clobTokenIds?.[order.side === 'yes' ? 0 : 1];
-      if (!tokenId) {
-        throw new Error(`Token ID not found for ${order.side} side of market ${order.contractId}`);
-      }
-
-      // Create order payload
-      const orderPayload = {
-        market: order.contractId,
-        asset_id: tokenId,
-        side: 'BUY', // Always buy the outcome we want
-        size: order.quantity.toString(),
-        price: (order.limitPrice || market.yesPrice).toString(),
-        type: order.orderType === 'market' ? 'MARKET' : 'LIMIT',
-        client_order_id: `ancf_${Date.now()}`,
-      };
-
-      // Sign the order (simplified - actual implementation needs proper EIP-712 signing)
-      const signature = await this.signOrder(orderPayload);
-
-      console.log(
-        `Placing Polymarket order: ${order.quantity} ${order.side} contracts of ${order.contractId}`,
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.client.post('/orders', {
+          ...orderPayload,
+          signature,
+          address: this.address,
+        }),
       );
 
-      const response = await this.client.post('/orders', {
-        ...orderPayload,
-        signature,
-        address: this.address,
-      });
-
       const placedOrder: PolymarketOrder = response.data;
+
+      this.logger.info('Order placed', {
+        orderId: placedOrder.id,
+        status: placedOrder.status,
+      });
 
       return {
         orderId: placedOrder.id,
@@ -290,7 +294,10 @@ export class PolymarketPlatform implements BettingPlatform {
         timestamp: new Date(placedOrder.created_at),
       };
     } catch (error) {
-      console.error('Failed to place Polymarket order:', error);
+      this.logger.error('Failed to place order', {
+        contractId: order.contractId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
   }
@@ -300,38 +307,40 @@ export class PolymarketPlatform implements BettingPlatform {
       throw new Error('No wallet configured for signing');
     }
 
-    // Simplified signature - actual implementation needs EIP-712
     const message = JSON.stringify(order);
     return await this.wallet.signMessage(message);
   }
 
   async cancelOrder(orderId: string): Promise<boolean> {
-    try {
-      if (!this.apiKey || !this.apiSecret) {
-        throw new Error('Polymarket order cancellation requires API credentials');
-      }
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('Polymarket order cancellation requires API credentials');
+    }
 
-      await this.client.delete(`/orders/${orderId}`);
-      console.log(`Polymarket order ${orderId} cancelled`);
+    try {
+      await withRateLimit(this.rateLimiter, () => this.client.delete(`/orders/${orderId}`));
+      this.logger.info('Order cancelled', { orderId });
       return true;
     } catch (error) {
-      console.error(`Failed to cancel Polymarket order ${orderId}:`, error);
+      this.logger.error('Failed to cancel order', {
+        orderId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return false;
     }
   }
 
   async getPositions(): Promise<Position[]> {
-    try {
-      if (!this.apiKey || !this.apiSecret) {
-        console.warn('Cannot fetch positions without API credentials');
-        return [];
-      }
+    if (!this.apiKey || !this.apiSecret) {
+      this.logger.warn('Cannot fetch positions without API credentials');
+      return [];
+    }
 
-      const response = await this.client.get('/positions', {
-        params: {
-          address: this.address,
-        },
-      });
+    try {
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.client.get('/positions', {
+          params: { address: this.address },
+        }),
+      );
 
       const polyPositions: PolymarketPosition[] = response.data;
       const positions: Position[] = [];
@@ -342,13 +351,11 @@ export class PolymarketPlatform implements BettingPlatform {
           continue;
         }
 
-        // Get current market price
         const market = await this.getContract(pos.market);
         if (!market) {
           continue;
         }
 
-        // Determine which side based on asset_id
         const clobTokenIds = market.metadata?.clobTokenIds as string[] | undefined;
         const isYes = clobTokenIds?.[0] === pos.asset_id;
         const currentPrice = isYes ? market.yesPrice : market.noPrice;
@@ -367,28 +374,20 @@ export class PolymarketPlatform implements BettingPlatform {
 
       return positions;
     } catch (error) {
-      console.error('Failed to fetch Polymarket positions:', error);
+      this.logger.error('Failed to fetch positions', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return [];
     }
   }
 
   async getBalance(): Promise<number> {
-    try {
-      if (!this.address) {
-        return 0;
-      }
-
-      // Get USDC balance on Polygon
-      // This would need to connect to Polygon RPC and check USDC contract
-      // For now, returning a placeholder
-      console.warn(
-        'Polymarket balance check not fully implemented - requires Polygon RPC connection',
-      );
-      return 0;
-    } catch (error) {
-      console.error('Failed to fetch Polymarket balance:', error);
+    if (!this.address) {
       return 0;
     }
+
+    this.logger.warn('Balance check not fully implemented - requires Polygon RPC connection');
+    return 0;
   }
 
   async getMarketResolution(contractId: string): Promise<MarketResolution | null> {
@@ -416,10 +415,13 @@ export class PolymarketPlatform implements BettingPlatform {
         resolved: true,
         outcome,
         settlementPrice,
-        timestamp: new Date(), // Polymarket doesn't provide resolution timestamp
+        timestamp: new Date(),
       };
     } catch (error) {
-      console.error(`Failed to fetch Polymarket market resolution for ${contractId}:`, error);
+      this.logger.error('Failed to fetch market resolution', {
+        contractId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
   }
@@ -437,16 +439,21 @@ export class PolymarketPlatform implements BettingPlatform {
         return null;
       }
 
-      const response = await this.client.get(`/orderbook`, {
-        params: {
-          market: contractId,
-          asset_id: tokenId,
-        },
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.client.get(`/orderbook`, {
+          params: {
+            market: contractId,
+            asset_id: tokenId,
+          },
+        }),
+      );
 
       return response.data;
     } catch (error) {
-      console.error(`Failed to fetch Polymarket order book for ${contractId}:`, error);
+      this.logger.error('Failed to fetch order book', {
+        contractId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
   }
@@ -479,7 +486,7 @@ export class PolymarketPlatform implements BettingPlatform {
   }
 
   async destroy(): Promise<void> {
-    console.log('Polymarket Platform destroyed');
+    this.logger.info('Platform destroyed');
   }
 }
 

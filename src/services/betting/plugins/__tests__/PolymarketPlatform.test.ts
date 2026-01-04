@@ -395,9 +395,21 @@ describe('PolymarketPlatform', () => {
       mockDataClient.get.mockResolvedValueOnce({
         data: {
           id: 'market-123',
+          question: 'Will this happen?',
+          conditionId: 'condition-123',
+          slug: 'will-this-happen',
+          resolutionSource: 'polymarket',
+          endDate: '2025-01-01T00:00:00Z',
+          outcomePrices: ['1.00', '0.00'],
+          outcomes: ['Yes', 'No'],
+          volume: '100000',
+          volume24hr: '10000',
+          liquidity: '50000',
+          clobTokenIds: ['token1', 'token2'],
+          active: false,
+          accepting_orders: false,
           resolved: true,
           resolvedOutcome: 'Yes',
-          outcomes: ['Yes', 'No'],
         },
       });
 
@@ -415,6 +427,19 @@ describe('PolymarketPlatform', () => {
       mockDataClient.get.mockResolvedValueOnce({
         data: {
           id: 'market-123',
+          question: 'Will this happen?',
+          conditionId: 'condition-123',
+          slug: 'will-this-happen',
+          resolutionSource: 'polymarket',
+          endDate: '2025-01-01T00:00:00Z',
+          outcomePrices: ['0.50', '0.50'],
+          outcomes: ['Yes', 'No'],
+          volume: '100000',
+          volume24hr: '10000',
+          liquidity: '50000',
+          clobTokenIds: ['token1', 'token2'],
+          active: true,
+          accepting_orders: true,
           resolved: false,
         },
       });

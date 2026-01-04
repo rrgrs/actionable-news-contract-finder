@@ -1,8 +1,14 @@
 import { KalshiPlatform, KalshiPlatformPlugin } from '../KalshiPlatform';
 import axios from 'axios';
+import * as jwt from 'jsonwebtoken';
 import { BettingPlatformConfig, Order } from '../../../../types';
 
 jest.mock('axios');
+jest.mock('jsonwebtoken');
+jest.mock('fs', () => ({
+  readFileSync: jest.fn().mockReturnValue('fake-private-key'),
+}));
+
 const mockedAxios = axios as jest.Mocked<typeof axios>;
 
 describe('KalshiPlatform', () => {
@@ -31,9 +37,17 @@ describe('KalshiPlatform', () => {
           common: {},
         },
       },
-    };
+      interceptors: {
+        request: {
+          use: jest.fn(),
+        },
+      },
+    } as unknown as typeof mockAxiosInstance;
 
     mockedAxios.create = jest.fn().mockReturnValue(mockAxiosInstance);
+
+    // Mock jwt.sign to return a fake token
+    (jwt.sign as jest.Mock).mockReturnValue('fake-jwt-token');
   });
 
   afterEach(() => {
@@ -41,54 +55,37 @@ describe('KalshiPlatform', () => {
   });
 
   describe('initialize', () => {
-    it('should initialize with API credentials and authenticate', async () => {
+    it('should initialize with API credentials using JWT authentication', async () => {
       const config: BettingPlatformConfig = {
         name: 'kalshi',
-        apiKey: 'test-email@example.com',
-        apiSecret: 'test-password',
-      };
-
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          token: 'test-token',
-          member_id: 'test-member-id',
+        customConfig: {
+          apiKeyId: 'test-api-key-id',
+          privateKeyPath: '/path/to/private-key.pem',
         },
-      });
+      };
 
       await platform.initialize(config);
 
+      // fs.readFileSync is mocked to return 'fake-private-key'
+      // Default is live mode
       expect(mockedAxios.create).toHaveBeenCalledWith({
-        baseURL: 'https://trading-api.kalshi.com/trade-api/v2',
+        baseURL: 'https://api.elections.kalshi.com/trade-api/v2',
         headers: {
           'Content-Type': 'application/json',
         },
         timeout: 15000,
       });
-
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/login', {
-        email: 'test-email@example.com',
-        password: 'test-password',
-      });
-
-      expect(mockAxiosInstance.defaults.headers.common['Authorization']).toBe('Bearer test-token');
     });
 
-    it('should use demo mode when configured', async () => {
+    it('should use demo mode when enabled', async () => {
       const config: BettingPlatformConfig = {
         name: 'kalshi',
-        apiKey: 'test-email@example.com',
-        apiSecret: 'test-password',
         customConfig: {
+          apiKeyId: 'test-api-key-id',
+          privateKeyPath: '/path/to/private-key.pem',
           demoMode: true,
         },
       };
-
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          token: 'test-token',
-          member_id: 'test-member-id',
-        },
-      });
 
       await platform.initialize(config);
 
@@ -116,58 +113,64 @@ describe('KalshiPlatform', () => {
     beforeEach(async () => {
       const config: BettingPlatformConfig = {
         name: 'kalshi',
-        apiKey: 'test-email@example.com',
-        apiSecret: 'test-password',
-      };
-
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          token: 'test-token',
-          member_id: 'test-member-id',
+        customConfig: {
+          apiKeyId: 'test-api-key-id',
+          privateKeyPath: '/path/to/private-key.pem',
         },
-      });
+      };
 
       await platform.initialize(config);
     });
 
     it('should fetch and convert available contracts', async () => {
-      const mockEvents = {
+      // Mock the events endpoint (for fetchAllEventTitles)
+      const mockEventsResponse = {
         data: {
           events: [
             {
               event_ticker: 'FEDRATE',
-              series_ticker: 'FEDRATE-24',
               title: 'Federal Reserve Rate Decision',
-              category: 'Economics',
-              markets: [
-                {
-                  ticker: 'FEDRATE-24-HIKE',
-                  event_ticker: 'FEDRATE',
-                  title: 'Fed raises rates in December 2024',
-                  subtitle: 'Will the Fed raise rates?',
-                  yes_sub_title: 'Yes',
-                  no_sub_title: 'No',
-                  status: 'open',
-                  yes_ask: 3500, // 35 cents
-                  no_ask: 6500, // 65 cents
-                  yes_bid: 3000,
-                  no_bid: 7000,
-                  last_price: 3250,
-                  volume: 50000,
-                  volume_24h: 10000,
-                  liquidity: 100000,
-                  open_interest: 5000,
-                  close_time: '2024-12-31T23:59:59Z',
-                  expiration_time: '2025-01-01T00:00:00Z',
-                  market_type: 'binary',
-                },
-              ],
             },
           ],
+          cursor: null,
         },
       };
 
-      mockAxiosInstance.get.mockResolvedValueOnce(mockEvents);
+      // Mock the markets endpoint
+      const mockMarketsResponse = {
+        data: {
+          markets: [
+            {
+              ticker: 'FEDRATE-24-HIKE',
+              event_ticker: 'FEDRATE',
+              title: 'Fed raises rates in December 2024',
+              subtitle: 'Will the Fed raise rates?',
+              yes_sub_title: 'Yes',
+              no_sub_title: 'No',
+              status: 'open',
+              yes_ask: 35, // 35 cents = $0.35
+              no_ask: 65, // 65 cents = $0.65
+              yes_bid: 30,
+              no_bid: 70,
+              last_price: 32,
+              volume: 50000,
+              volume_24h: 10000,
+              liquidity: 100000,
+              open_interest: 5000,
+              open_time: '2024-01-01T00:00:00Z',
+              close_time: '2024-12-31T23:59:59Z',
+              expiration_time: '2025-01-01T00:00:00Z',
+              market_type: 'binary',
+            },
+          ],
+          cursor: null,
+        },
+      };
+
+      // First call is for events, second is for markets
+      mockAxiosInstance.get
+        .mockResolvedValueOnce(mockEventsResponse)
+        .mockResolvedValueOnce(mockMarketsResponse);
 
       const contracts = await platform.getAvailableContracts();
 
@@ -175,7 +178,7 @@ describe('KalshiPlatform', () => {
       expect(contracts[0]).toMatchObject({
         id: 'FEDRATE-24-HIKE',
         platform: 'kalshi',
-        title: 'Fed raises rates in December 2024',
+        title: 'Yes',
         yesPrice: 0.35,
         noPrice: 0.65,
         volume: 50000,
@@ -188,16 +191,11 @@ describe('KalshiPlatform', () => {
     beforeEach(async () => {
       const config: BettingPlatformConfig = {
         name: 'kalshi',
-        apiKey: 'test-email@example.com',
-        apiSecret: 'test-password',
-      };
-
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          token: 'test-token',
-          member_id: 'test-member-id',
+        customConfig: {
+          apiKeyId: 'test-api-key-id',
+          privateKeyPath: '/path/to/private-key.pem',
         },
-      });
+      };
 
       await platform.initialize(config);
     });
@@ -284,16 +282,11 @@ describe('KalshiPlatform', () => {
     beforeEach(async () => {
       const config: BettingPlatformConfig = {
         name: 'kalshi',
-        apiKey: 'test-email@example.com',
-        apiSecret: 'test-password',
-      };
-
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          token: 'test-token',
-          member_id: 'test-member-id',
+        customConfig: {
+          apiKeyId: 'test-api-key-id',
+          privateKeyPath: '/path/to/private-key.pem',
         },
-      });
+      };
 
       await platform.initialize(config);
     });
@@ -319,8 +312,8 @@ describe('KalshiPlatform', () => {
             market: {
               ticker: 'FEDRATE-24-HIKE',
               event_ticker: 'FEDRATE',
-              yes_ask: 4000,
-              no_ask: 6000,
+              yes_ask: 40, // 40 cents = $0.40
+              no_ask: 60, // 60 cents = $0.60
               status: 'open',
               title: 'Fed Rate Hike',
               subtitle: 'Will rates increase?',
@@ -359,16 +352,11 @@ describe('KalshiPlatform', () => {
     beforeEach(async () => {
       const config: BettingPlatformConfig = {
         name: 'kalshi',
-        apiKey: 'test-email@example.com',
-        apiSecret: 'test-password',
-      };
-
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          token: 'test-token',
-          member_id: 'test-member-id',
+        customConfig: {
+          apiKeyId: 'test-api-key-id',
+          privateKeyPath: '/path/to/private-key.pem',
         },
-      });
+      };
 
       await platform.initialize(config);
     });
@@ -391,16 +379,11 @@ describe('KalshiPlatform', () => {
     beforeEach(async () => {
       const config: BettingPlatformConfig = {
         name: 'kalshi',
-        apiKey: 'test-email@example.com',
-        apiSecret: 'test-password',
-      };
-
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          token: 'test-token',
-          member_id: 'test-member-id',
+        customConfig: {
+          apiKeyId: 'test-api-key-id',
+          privateKeyPath: '/path/to/private-key.pem',
         },
-      });
+      };
 
       await platform.initialize(config);
     });

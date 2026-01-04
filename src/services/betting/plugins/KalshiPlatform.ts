@@ -11,6 +11,8 @@ import {
   Position,
   MarketResolution,
 } from '../../../types';
+import { RateLimiter, withRateLimit } from '../../../utils/rateLimiter';
+import { createLogger, Logger } from '../../../utils/logger';
 
 interface KalshiMarket {
   ticker: string;
@@ -105,11 +107,17 @@ export class KalshiPlatform implements BettingPlatform {
   name = 'kalshi';
   private apiKeyId: string = '';
   private privateKey: string = '';
-  private baseUrl: string = 'https://api.elections.kalshi.com/trade-api/v2'; // Production API
+  private baseUrl: string = 'https://api.elections.kalshi.com/trade-api/v2';
   private demoUrl: string = 'https://demo-api.kalshi.co/trade-api/v2';
   private client!: AxiosInstance;
-  private isDemoMode = true; // Default to demo since production endpoints are not accessible
+  private isDemoMode = true;
   private excludedCategories: Set<string> = new Set();
+  private rateLimiter!: RateLimiter;
+  private logger: Logger;
+
+  constructor() {
+    this.logger = createLogger('Kalshi');
+  }
 
   async initialize(config: BettingPlatformConfig): Promise<void> {
     const customConfig = config.customConfig as Record<string, unknown> | undefined;
@@ -144,6 +152,17 @@ export class KalshiPlatform implements BettingPlatform {
       : DEFAULT_EXCLUDED_CATEGORIES.map((c) => c.toLowerCase());
     this.excludedCategories = new Set(categoriesToExclude);
 
+    // Initialize rate limiter (Kalshi allows ~10 req/sec for basic tier)
+    this.rateLimiter = new RateLimiter(
+      {
+        minDelayMs: 100,
+        requestsPerMinute: 600,
+        maxRetries: 5,
+        baseBackoffMs: 1000,
+      },
+      'Kalshi',
+    );
+
     // Initialize HTTP client
     this.client = axios.create({
       baseURL: this.isDemoMode ? this.demoUrl : this.baseUrl,
@@ -160,10 +179,10 @@ export class KalshiPlatform implements BettingPlatform {
       return config;
     });
 
-    console.log(
-      `Kalshi Platform initialized with API key authentication (${this.isDemoMode ? 'DEMO' : 'LIVE'} mode)`,
-    );
-    console.log(`Kalshi: excluding categories: ${Array.from(this.excludedCategories).join(', ')}`);
+    this.logger.info('Platform initialized', {
+      mode: this.isDemoMode ? 'DEMO' : 'LIVE',
+      excludedCategories: Array.from(this.excludedCategories).join(', '),
+    });
   }
 
   private generateJWT(method: string, path: string): string {
@@ -173,7 +192,7 @@ export class KalshiPlatform implements BettingPlatform {
       iss: this.apiKeyId,
       sub: this.apiKeyId,
       iat: now,
-      exp: now + 60, // Token expires in 60 seconds
+      exp: now + 60,
       method: method,
       path: path,
     };
@@ -181,62 +200,36 @@ export class KalshiPlatform implements BettingPlatform {
     return jwt.sign(payload, this.privateKey, { algorithm: 'RS256' });
   }
 
-  private async delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
   async getAvailableContracts(): Promise<Contract[]> {
     // First, fetch all events to get correct titles
-    // The /markets endpoint returns incomplete titles (missing person names, etc.)
-    // The /events endpoint has the complete titles
     const eventTitles = await this.fetchAllEventTitles();
-    console.log(`Kalshi: fetched ${eventTitles.size} event titles`);
+    this.logger.debug('Fetched event titles', { count: eventTitles.size });
 
     const contracts: Contract[] = [];
     let cursor: string | undefined;
 
     do {
-      // Rate limit: 20 req/s for basic tier, wait 100ms between requests
-      await this.delay(100);
-
-      // Retry logic with exponential backoff for rate limits
-      let response;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-          response = await this.client.get('/markets', {
-            params: {
-              status: 'open',
-              limit: 200,
-              cursor,
-            },
-          });
-          break; // Success, exit retry loop
-        } catch (error) {
-          if (axios.isAxiosError(error) && error.response?.status === 429) {
-            const waitTime = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s, 8s, 16s
-            console.log(`Rate limited, waiting ${waitTime / 1000}s...`);
-            await this.delay(waitTime);
-          } else {
-            throw error;
-          }
-        }
-      }
-
-      if (!response) {
-        throw new Error('Failed to fetch markets after retries');
-      }
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.client.get('/markets', {
+          params: {
+            status: 'open',
+            limit: 200,
+            cursor,
+          },
+        }),
+      );
 
       const markets: KalshiMarket[] = response.data.markets || [];
       cursor = response.data.cursor;
 
-      // Only log every 10th page to reduce noise
+      // Log progress every 2000 markets
       if (contracts.length % 2000 === 0 || !cursor) {
-        console.log(`Kalshi: fetched ${contracts.length} markets so far...`);
+        this.logger.debug('Fetching markets', { fetched: contracts.length });
       }
 
       const now = new Date();
       for (const market of markets) {
-        // Skip markets that haven't opened yet (showing "launching in" on Kalshi)
+        // Skip markets that haven't opened yet
         const openTime = new Date(market.open_time);
         if (openTime > now) {
           continue;
@@ -251,49 +244,32 @@ export class KalshiPlatform implements BettingPlatform {
       }
     } while (cursor);
 
-    console.log(
-      `Kalshi: ${contracts.length} total contracts found (excluding: ${Array.from(this.excludedCategories).join(', ')})`,
-    );
+    this.logger.info('Fetched all contracts', {
+      total: contracts.length,
+      excludedCategories: Array.from(this.excludedCategories).join(', '),
+    });
 
     return contracts;
   }
 
   /**
-   * Fetch all event titles from the /events endpoint
-   * This is needed because /markets returns incomplete titles (missing person names, etc.)
+   * Fetch all event titles from the /events endpoint.
+   * The /markets endpoint returns incomplete titles (missing person names, etc.)
    */
   private async fetchAllEventTitles(): Promise<Map<string, string>> {
     const eventTitles = new Map<string, string>();
     let cursor: string | undefined;
 
     do {
-      await this.delay(100);
-
-      let response;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-          response = await this.client.get('/events', {
-            params: {
-              status: 'open',
-              limit: 200,
-              cursor,
-            },
-          });
-          break;
-        } catch (error) {
-          if (axios.isAxiosError(error) && error.response?.status === 429) {
-            const waitTime = Math.pow(2, attempt) * 1000;
-            console.log(`Rate limited on events, waiting ${waitTime / 1000}s...`);
-            await this.delay(waitTime);
-          } else {
-            throw error;
-          }
-        }
-      }
-
-      if (!response) {
-        throw new Error('Failed to fetch events after retries');
-      }
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.client.get('/events', {
+          params: {
+            status: 'open',
+            limit: 200,
+            cursor,
+          },
+        }),
+      );
 
       const events: KalshiEvent[] = response.data.events || [];
       cursor = response.data.cursor;
@@ -308,21 +284,28 @@ export class KalshiPlatform implements BettingPlatform {
 
   async getContract(contractId: string): Promise<Contract | null> {
     try {
-      const response = await this.client.get(`/markets/${contractId}`);
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.client.get(`/markets/${contractId}`),
+      );
       const market: KalshiMarket = response.data.market;
 
       // Get the parent event for additional context
-      const eventResponse = await this.client.get('/events', {
-        params: {
-          event_ticker: market.event_ticker,
-        },
-      });
+      const eventResponse = await withRateLimit(this.rateLimiter, () =>
+        this.client.get('/events', {
+          params: {
+            event_ticker: market.event_ticker,
+          },
+        }),
+      );
 
       const event: KalshiEvent = eventResponse.data.events[0];
 
       return this.convertMarketToContract(market, event);
     } catch (error) {
-      console.error(`Failed to fetch Kalshi contract ${contractId}:`, error);
+      this.logger.error('Failed to fetch contract', {
+        contractId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
   }
@@ -339,15 +322,13 @@ export class KalshiPlatform implements BettingPlatform {
     const yesPrice = market.yes_ask ? market.yes_ask / 100 : 0.5;
     const noPrice = market.no_ask ? market.no_ask / 100 : 0.5;
 
-    // Use event_ticker for URL - Kalshi's /events/{event_ticker} format works
+    // Use event_ticker for URL
     const eventTicker = market.event_ticker || market.ticker;
 
-    // Contract title should describe the specific outcome, not the market question
-    // Use yes_sub_title if available (e.g., "Loyola Marymount"), otherwise fall back to market title
+    // Contract title should describe the specific outcome
     const contractTitle = market.yes_sub_title || market.title;
 
-    // Use event title for marketTitle (it has the complete text, including person names)
-    // Fall back to market.title if event title not found
+    // Use event title for marketTitle (complete text including person names)
     const marketTitle = eventTitles.get(market.event_ticker) || market.title;
 
     return {
@@ -364,7 +345,7 @@ export class KalshiPlatform implements BettingPlatform {
       metadata: {
         eventTicker: market.event_ticker,
         marketTicker: market.ticker,
-        marketTitle, // Event title (complete) for deriving market-level title
+        marketTitle,
         yesSubTitle: market.yes_sub_title,
         noSubTitle: market.no_sub_title,
         volume24h: market.volume_24h,
@@ -388,7 +369,7 @@ export class KalshiPlatform implements BettingPlatform {
     const yesPrice = market.yes_ask ? market.yes_ask / 100 : 0.5;
     const noPrice = market.no_ask ? market.no_ask / 100 : 0.5;
 
-    // Contract title should describe the specific outcome, not the market question
+    // Contract title should describe the specific outcome
     const contractTitle = market.yes_sub_title || market.title;
 
     return {
@@ -421,32 +402,41 @@ export class KalshiPlatform implements BettingPlatform {
   }
 
   async placeOrder(order: Order): Promise<OrderStatus> {
-    try {
-      // Convert our Order to Kalshi format
-      const kalshiOrder: KalshiOrderRequest = {
-        ticker: order.contractId,
-        client_order_id: `ancf_${Date.now()}`,
-        side: order.side as 'yes' | 'no',
-        action: 'buy',
-        count: order.quantity,
-        type: order.orderType as 'market' | 'limit',
-      };
+    const kalshiOrder: KalshiOrderRequest = {
+      ticker: order.contractId,
+      client_order_id: `ancf_${Date.now()}`,
+      side: order.side as 'yes' | 'no',
+      action: 'buy',
+      count: order.quantity,
+      type: order.orderType as 'market' | 'limit',
+    };
 
-      // Set price based on side (Kalshi uses cents)
-      if (order.orderType === 'limit' && order.limitPrice) {
-        if (order.side === 'yes') {
-          kalshiOrder.yes_price = Math.round(order.limitPrice * 100);
-        } else {
-          kalshiOrder.no_price = Math.round(order.limitPrice * 100);
-        }
+    // Set price based on side (Kalshi uses cents)
+    if (order.orderType === 'limit' && order.limitPrice) {
+      if (order.side === 'yes') {
+        kalshiOrder.yes_price = Math.round(order.limitPrice * 100);
+      } else {
+        kalshiOrder.no_price = Math.round(order.limitPrice * 100);
       }
+    }
 
-      console.log(
-        `Placing Kalshi order: ${order.quantity} ${order.side} contracts of ${order.contractId}`,
+    this.logger.info('Placing order', {
+      contractId: order.contractId,
+      side: order.side,
+      quantity: order.quantity,
+      type: order.orderType,
+    });
+
+    try {
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.client.post('/portfolio/orders', kalshiOrder),
       );
-
-      const response = await this.client.post('/portfolio/orders', kalshiOrder);
       const placedOrder: KalshiOrder = response.data.order;
+
+      this.logger.info('Order placed', {
+        orderId: placedOrder.order_id,
+        status: placedOrder.status,
+      });
 
       return {
         orderId: placedOrder.order_id,
@@ -458,25 +448,35 @@ export class KalshiPlatform implements BettingPlatform {
         timestamp: new Date(placedOrder.created_time),
       };
     } catch (error) {
-      console.error('Failed to place Kalshi order:', error);
+      this.logger.error('Failed to place order', {
+        contractId: order.contractId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
   }
 
   async cancelOrder(orderId: string): Promise<boolean> {
     try {
-      await this.client.delete(`/portfolio/orders/${orderId}`);
-      console.log(`Kalshi order ${orderId} cancelled`);
+      await withRateLimit(this.rateLimiter, () =>
+        this.client.delete(`/portfolio/orders/${orderId}`),
+      );
+      this.logger.info('Order cancelled', { orderId });
       return true;
     } catch (error) {
-      console.error(`Failed to cancel Kalshi order ${orderId}:`, error);
+      this.logger.error('Failed to cancel order', {
+        orderId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return false;
     }
   }
 
   async getPositions(): Promise<Position[]> {
     try {
-      const response = await this.client.get('/portfolio/positions');
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.client.get('/portfolio/positions'),
+      );
       const kalshiPositions: KalshiPosition[] = response.data.market_positions;
 
       const positions: Position[] = [];
@@ -508,24 +508,32 @@ export class KalshiPlatform implements BettingPlatform {
 
       return positions;
     } catch (error) {
-      console.error('Failed to fetch Kalshi positions:', error);
+      this.logger.error('Failed to fetch positions', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return [];
     }
   }
 
   async getBalance(): Promise<number> {
     try {
-      const response = await this.client.get('/portfolio/balance');
-      return response.data.balance / 100; // Convert cents to dollars
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.client.get('/portfolio/balance'),
+      );
+      return response.data.balance / 100;
     } catch (error) {
-      console.error('Failed to fetch Kalshi balance:', error);
+      this.logger.error('Failed to fetch balance', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return 0;
     }
   }
 
   async getMarketResolution(contractId: string): Promise<MarketResolution | null> {
     try {
-      const response = await this.client.get(`/markets/${contractId}`);
+      const response = await withRateLimit(this.rateLimiter, () =>
+        this.client.get(`/markets/${contractId}`),
+      );
       const market: KalshiMarket = response.data.market;
 
       if (market.status !== 'settled') {
@@ -540,7 +548,10 @@ export class KalshiPlatform implements BettingPlatform {
         timestamp: new Date(market.settlement_time),
       };
     } catch (error) {
-      console.error(`Failed to fetch Kalshi market resolution for ${contractId}:`, error);
+      this.logger.error('Failed to fetch market resolution', {
+        contractId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
   }
@@ -569,7 +580,7 @@ export class KalshiPlatform implements BettingPlatform {
   }
 
   async destroy(): Promise<void> {
-    console.log('Kalshi Platform destroyed');
+    this.logger.info('Platform destroyed');
   }
 }
 

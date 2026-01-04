@@ -1,5 +1,7 @@
 import axios from 'axios';
 import { NewsService, NewsServiceConfig, NewsItem, NewsServicePlugin } from '../../../types';
+import { RateLimiter, withRateLimit } from '../../../utils/rateLimiter';
+import { createLogger, Logger } from '../../../utils/logger';
 
 interface RSSFeed {
   name: string;
@@ -7,33 +9,17 @@ interface RSSFeed {
   category?: string;
 }
 
-// Commented out unused interface
-// interface RSSItem {
-//   title: string;
-//   link: string;
-//   description?: string;
-//   pubDate?: string;
-//   guid?: string;
-//   creator?: string;
-//   category?: string[];
-//   content?: string;
-// }
-
 export class RSSAggregatorService implements NewsService {
   name = 'rss-aggregator';
   private feeds: RSSFeed[] = [];
   private processedGuids = new Set<string>();
   private maxItemsPerFeed = 20;
-  // private dedupTimeWindowMs = 3600000; // 1 hour - unused
   private lastFetchTime: Map<string, Date> = new Map();
+  private rateLimiter!: RateLimiter;
+  private logger: Logger;
 
-  // Default high-quality news feeds with working URLs
   private readonly defaultFeeds: RSSFeed[] = [
-    {
-      name: 'BBC World',
-      url: 'https://feeds.bbci.co.uk/news/world/rss.xml',
-      category: 'world',
-    },
+    { name: 'BBC World', url: 'https://feeds.bbci.co.uk/news/world/rss.xml', category: 'world' },
     {
       name: 'BBC Business',
       url: 'https://feeds.bbci.co.uk/news/business/rss.xml',
@@ -44,47 +30,30 @@ export class RSSAggregatorService implements NewsService {
       url: 'http://rss.cnn.com/rss/cnn_topstories.rss',
       category: 'general',
     },
-    {
-      name: 'CNN Money',
-      url: 'http://rss.cnn.com/rss/money_latest.rss',
-      category: 'markets',
-    },
-    {
-      name: 'TechCrunch',
-      url: 'https://techcrunch.com/feed/',
-      category: 'technology',
-    },
-    {
-      name: 'The Guardian World',
-      url: 'https://www.theguardian.com/world/rss',
-      category: 'world',
-    },
+    { name: 'CNN Money', url: 'http://rss.cnn.com/rss/money_latest.rss', category: 'markets' },
+    { name: 'TechCrunch', url: 'https://techcrunch.com/feed/', category: 'technology' },
+    { name: 'The Guardian World', url: 'https://www.theguardian.com/world/rss', category: 'world' },
     {
       name: 'The Guardian Business',
       url: 'https://www.theguardian.com/business/rss',
       category: 'business',
     },
-    {
-      name: 'Yahoo Finance',
-      url: 'https://finance.yahoo.com/news/rssindex',
-      category: 'finance',
-    },
+    { name: 'Yahoo Finance', url: 'https://finance.yahoo.com/news/rssindex', category: 'finance' },
     {
       name: 'MarketWatch',
       url: 'http://feeds.marketwatch.com/marketwatch/topstories/',
       category: 'markets',
     },
-    {
-      name: 'Seeking Alpha',
-      url: 'https://seekingalpha.com/feed.xml',
-      category: 'markets',
-    },
+    { name: 'Seeking Alpha', url: 'https://seekingalpha.com/feed.xml', category: 'markets' },
   ];
+
+  constructor() {
+    this.logger = createLogger('RSS');
+  }
 
   async initialize(config: NewsServiceConfig): Promise<void> {
     const customConfig = config.customConfig as Record<string, string> | undefined;
 
-    // Load custom feeds from config or use defaults
     if (customConfig?.feeds) {
       const feedUrls = customConfig.feeds.split(',').map((f: string) => f.trim());
       this.feeds = feedUrls.map((url: string) => ({
@@ -99,9 +68,20 @@ export class RSSAggregatorService implements NewsService {
       this.maxItemsPerFeed = parseInt(customConfig.maxItemsPerFeed);
     }
 
-    console.log(`RSS Aggregator initialized with ${this.feeds.length} feeds`);
+    // Initialize rate limiter (conservative for RSS2JSON service)
+    this.rateLimiter = new RateLimiter(
+      {
+        minDelayMs: 500,
+        requestsPerMinute: 30,
+        maxRetries: 2,
+        baseBackoffMs: 1000,
+      },
+      'RSS',
+    );
+
+    this.logger.info('Service initialized', { feedCount: this.feeds.length });
     this.feeds.forEach((feed) => {
-      console.log(`  - ${feed.name}: ${feed.url}`);
+      this.logger.debug('Feed configured', { name: feed.name, url: feed.url });
     });
   }
 
@@ -109,24 +89,22 @@ export class RSSAggregatorService implements NewsService {
     const allNews: NewsItem[] = [];
     const fetchPromises = this.feeds.map((feed) => this.fetchFeed(feed));
 
-    // Fetch all feeds in parallel for speed
     const results = await Promise.allSettled(fetchPromises);
 
     results.forEach((result, index) => {
       if (result.status === 'fulfilled' && result.value) {
         allNews.push(...result.value);
       } else if (result.status === 'rejected') {
-        console.error(`Failed to fetch ${this.feeds[index].name}:`, result.reason);
+        this.logger.error('Failed to fetch feed', {
+          feed: this.feeds[index].name,
+          error: result.reason,
+        });
       }
     });
 
-    // Deduplicate news items by title similarity
     const deduplicatedNews = this.deduplicateNews(allNews);
-
-    // Sort by publication date (newest first)
     deduplicatedNews.sort((a, b) => b.publishedAt.getTime() - a.publishedAt.getTime());
 
-    // Clean up old GUIDs to prevent memory leak
     if (this.processedGuids.size > 2000) {
       const guidsArray = Array.from(this.processedGuids);
       this.processedGuids = new Set(guidsArray.slice(-1000));
@@ -137,14 +115,15 @@ export class RSSAggregatorService implements NewsService {
 
   private async fetchFeed(feed: RSSFeed): Promise<NewsItem[]> {
     try {
-      // Use a simple RSS to JSON service for parsing
-      const response = await axios.get(`https://api.rss2json.com/v1/api.json`, {
-        params: {
-          rss_url: feed.url,
-          count: this.maxItemsPerFeed,
-        },
-        timeout: 10000,
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        axios.get(`https://api.rss2json.com/v1/api.json`, {
+          params: {
+            rss_url: feed.url,
+            count: this.maxItemsPerFeed,
+          },
+          timeout: 10000,
+        }),
+      );
 
       if (response.data.status !== 'ok') {
         throw new Error(`RSS feed error: ${response.data.message}`);
@@ -156,7 +135,6 @@ export class RSSAggregatorService implements NewsService {
       for (const item of feedItems) {
         const guid = item.guid || item.link;
 
-        // Skip if already processed
         if (this.processedGuids.has(guid)) {
           continue;
         }
@@ -184,29 +162,28 @@ export class RSSAggregatorService implements NewsService {
         items.push(newsItem);
       }
 
-      // Update last fetch time
       this.lastFetchTime.set(feed.url, new Date());
 
       return items;
     } catch {
-      // Fallback to direct XML parsing if RSS2JSON fails
       return this.fetchFeedDirectly(feed);
     }
   }
 
   private async fetchFeedDirectly(feed: RSSFeed): Promise<NewsItem[]> {
     try {
-      const response = await axios.get(feed.url, {
-        headers: {
-          Accept: 'application/rss+xml, application/xml, text/xml',
-        },
-        timeout: 10000,
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        axios.get(feed.url, {
+          headers: {
+            Accept: 'application/rss+xml, application/xml, text/xml',
+          },
+          timeout: 10000,
+        }),
+      );
 
       const items: NewsItem[] = [];
       const xml = response.data;
 
-      // Simple XML parsing using regex (not perfect but works for most RSS)
       const itemMatches = xml.match(/<item>([\s\S]*?)<\/item>/gi) || [];
 
       for (const itemXml of itemMatches.slice(0, this.maxItemsPerFeed)) {
@@ -220,7 +197,6 @@ export class RSSAggregatorService implements NewsService {
           continue;
         }
 
-        // Skip if already processed
         if (this.processedGuids.has(guid)) {
           continue;
         }
@@ -250,7 +226,10 @@ export class RSSAggregatorService implements NewsService {
 
       return items;
     } catch (error) {
-      console.error(`Failed to fetch RSS feed ${feed.name} directly:`, error);
+      this.logger.error('Failed to fetch feed directly', {
+        feed: feed.name,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return [];
     }
   }
@@ -263,7 +242,6 @@ export class RSSAggregatorService implements NewsService {
   }
 
   async searchNews(query: string, from?: Date, to?: Date): Promise<NewsItem[]> {
-    // For RSS feeds, we'll fetch latest and filter
     const allNews = await this.fetchLatestNews();
 
     return allNews.filter((item) => {
@@ -279,7 +257,6 @@ export class RSSAggregatorService implements NewsService {
   }
 
   private extractContent(item: Record<string, unknown>): string {
-    // Try to get the most complete content
     const content =
       (item.content as string) ||
       (item['content:encoded'] as string) ||
@@ -295,7 +272,7 @@ export class RSSAggregatorService implements NewsService {
     }
 
     return text
-      .replace(/<[^>]*>/g, '') // Remove HTML tags
+      .replace(/<[^>]*>/g, '')
       .replace(/&nbsp;/g, ' ')
       .replace(/&amp;/g, '&')
       .replace(/&lt;/g, '<')
@@ -309,12 +286,10 @@ export class RSSAggregatorService implements NewsService {
   private extractTags(item: Record<string, unknown>, feed: RSSFeed): string[] {
     const tags: string[] = [];
 
-    // Add feed category
     if (feed.category) {
       tags.push(feed.category);
     }
 
-    // Add item categories
     const categories = item.categories;
     if (categories) {
       if (Array.isArray(categories)) {
@@ -324,7 +299,6 @@ export class RSSAggregatorService implements NewsService {
       }
     }
 
-    // Extract keywords from title and description
     const text = `${item.title || ''} ${item.description || ''}`.toLowerCase();
     const keywords = [
       'breaking',
@@ -396,7 +370,6 @@ export class RSSAggregatorService implements NewsService {
   }
 
   private generateId(text: string): string {
-    // Simple hash function for generating IDs
     let hash = 0;
     for (let i = 0; i < text.length; i++) {
       const char = text.charCodeAt(i);
@@ -411,7 +384,6 @@ export class RSSAggregatorService implements NewsService {
     const description = ((item.description as string) || '').toLowerCase();
     const text = title + ' ' + description;
 
-    // High importance keywords
     if (
       text.includes('breaking') ||
       text.includes('urgent') ||
@@ -423,7 +395,6 @@ export class RSSAggregatorService implements NewsService {
       return 'high';
     }
 
-    // Medium importance keywords
     if (
       text.includes('announce') ||
       text.includes('report') ||
@@ -441,14 +412,12 @@ export class RSSAggregatorService implements NewsService {
     const seenTitles = new Set<string>();
 
     for (const item of items) {
-      // Create a normalized title for comparison
       const normalizedTitle = item.title
         .toLowerCase()
         .replace(/[^\w\s]/g, '')
         .replace(/\s+/g, ' ')
         .trim();
 
-      // Check for very similar titles (could be enhanced with fuzzy matching)
       let isDuplicate = false;
       for (const seenTitle of seenTitles) {
         if (this.areSimilar(normalizedTitle, seenTitle)) {
@@ -467,7 +436,6 @@ export class RSSAggregatorService implements NewsService {
   }
 
   private areSimilar(str1: string, str2: string): boolean {
-    // Simple similarity check - could be enhanced with Levenshtein distance
     const words1 = str1.split(' ');
     const words2 = str2.split(' ');
 
@@ -488,7 +456,6 @@ export class RSSAggregatorService implements NewsService {
 
   async isHealthy(): Promise<boolean> {
     try {
-      // Check if at least one feed is accessible
       const healthChecks = this.feeds.slice(0, 3).map((feed) =>
         axios
           .head(feed.url, { timeout: 5000 })
@@ -506,7 +473,7 @@ export class RSSAggregatorService implements NewsService {
   async destroy(): Promise<void> {
     this.processedGuids.clear();
     this.lastFetchTime.clear();
-    console.log('RSS Aggregator Service destroyed');
+    this.logger.info('Service destroyed');
   }
 }
 

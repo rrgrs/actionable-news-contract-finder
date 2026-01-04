@@ -1,5 +1,7 @@
 import axios from 'axios';
 import { NewsService, NewsServiceConfig, NewsItem, NewsServicePlugin } from '../../../types';
+import { RateLimiter, withRateLimit } from '../../../utils/rateLimiter';
+import { createLogger, Logger } from '../../../utils/logger';
 
 interface TwitterUser {
   id: string;
@@ -55,32 +57,28 @@ export class TwitterNewsService implements NewsService {
   private processedTweetIds = new Set<string>();
   private followedAccounts: string[] = [];
   private searchKeywords: string[] = [];
-  private maxResults = 10; // Reduced to minimize API calls
-  private minEngagement = 10; // Minimum likes + retweets
-  private lastApiCallTime = 0;
-  private apiCallDelayMs = 5000; // 5 second delay between API calls
-  private rateLimitRemaining = 15; // Twitter v2 rate limit
-  private rateLimitReset = 0;
+  private maxResults = 10;
+  private minEngagement = 10;
+  private rateLimiter!: RateLimiter;
+  private logger: Logger;
 
-  // Default news accounts to follow
   private readonly defaultAccounts = [
-    'FirstSquawk', // Market news alerts
-    'DeItaone', // Walter Bloomberg - financial news
-    'unusual_whales', // Options flow and market data
-    'zerohedge', // Financial news and analysis
-    'Reuters', // Reuters official
-    'AP', // Associated Press
-    'BBCBreaking', // BBC Breaking News
-    'CNBCnow', // CNBC breaking news
-    'WSJ', // Wall Street Journal
-    'FT', // Financial Times
-    'business', // Bloomberg
-    'ForexLive', // Forex and market news
-    'LiveSquawk', // Market squawk service
-    'MarketWatch', // MarketWatch
+    'FirstSquawk',
+    'DeItaone',
+    'unusual_whales',
+    'zerohedge',
+    'Reuters',
+    'AP',
+    'BBCBreaking',
+    'CNBCnow',
+    'WSJ',
+    'FT',
+    'business',
+    'ForexLive',
+    'LiveSquawk',
+    'MarketWatch',
   ];
 
-  // Market-moving keywords to track
   private readonly defaultKeywords = [
     'BREAKING',
     'URGENT',
@@ -105,25 +103,36 @@ export class TwitterNewsService implements NewsService {
     'tariff',
   ];
 
+  constructor() {
+    this.logger = createLogger('Twitter');
+  }
+
   async initialize(config: NewsServiceConfig): Promise<void> {
     const customConfig = config.customConfig as Record<string, string> | undefined;
 
-    // Bearer token is required for Twitter API v2
     this.bearerToken = customConfig?.bearerToken || process.env.TWITTER_BEARER_TOKEN || '';
 
     if (!this.bearerToken) {
-      console.warn('Twitter Bearer Token not provided. Using mock data mode.');
-      console.warn('To use real Twitter data, set TWITTER_BEARER_TOKEN in .env');
+      this.logger.warn('Bearer Token not provided, using mock data mode');
     }
 
-    // Configure accounts to follow
+    // Initialize rate limiter (Twitter API v2: 15 requests/15 minutes = 1 req/min)
+    this.rateLimiter = new RateLimiter(
+      {
+        minDelayMs: 5000,
+        requestsPerMinute: 15,
+        maxRetries: 3,
+        baseBackoffMs: 60000,
+      },
+      'Twitter',
+    );
+
     if (customConfig?.accounts) {
       this.followedAccounts = customConfig.accounts.split(',').map((a: string) => a.trim());
     } else {
       this.followedAccounts = [...this.defaultAccounts];
     }
 
-    // Configure search keywords
     if (customConfig?.keywords) {
       this.searchKeywords = customConfig.keywords.split(',').map((k: string) => k.trim());
     } else {
@@ -138,9 +147,10 @@ export class TwitterNewsService implements NewsService {
       this.minEngagement = parseInt(customConfig.minEngagement);
     }
 
-    console.log(`Twitter News Service initialized`);
-    console.log(`Following ${this.followedAccounts.length} accounts`);
-    console.log(`Tracking ${this.searchKeywords.length} keywords`);
+    this.logger.info('Service initialized', {
+      accountsCount: this.followedAccounts.length,
+      keywordsCount: this.searchKeywords.length,
+    });
   }
 
   async fetchLatestNews(): Promise<NewsItem[]> {
@@ -148,43 +158,32 @@ export class TwitterNewsService implements NewsService {
       return this.getMockNews();
     }
 
-    // Rate limiting check
-    if (this.rateLimitRemaining <= 1) {
-      const now = Date.now();
-      if (now < this.rateLimitReset) {
-        const waitTime = Math.ceil((this.rateLimitReset - now) / 1000);
-        console.log(`Twitter rate limit reached. Waiting ${waitTime} seconds...`);
-        return [];
-      }
-      // Reset rate limit
-      this.rateLimitRemaining = 15;
-    }
-
     const allNews: NewsItem[] = [];
 
-    // Fetch tweets from followed accounts
     for (const account of this.followedAccounts) {
       try {
         const tweets = await this.fetchUserTweets(account);
         allNews.push(...tweets);
       } catch (error) {
-        console.error(`Error fetching tweets from @${account}:`, error);
+        this.logger.error('Failed to fetch tweets from account', {
+          account,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 
-    // Also search for keyword-based tweets
     try {
       const keywordTweets = await this.searchTweets();
       allNews.push(...keywordTweets);
     } catch (error) {
-      console.error('Error searching tweets:', error);
+      this.logger.error('Failed to search tweets', {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
-    // Deduplicate and sort by time
     const uniqueNews = this.deduplicateNews(allNews);
     uniqueNews.sort((a, b) => b.publishedAt.getTime() - a.publishedAt.getTime());
 
-    // Clean up old IDs to prevent memory leak
     if (this.processedTweetIds.size > 1000) {
       const idsArray = Array.from(this.processedTweetIds);
       this.processedTweetIds = new Set(idsArray.slice(-500));
@@ -195,40 +194,30 @@ export class TwitterNewsService implements NewsService {
 
   private async fetchUserTweets(username: string): Promise<NewsItem[]> {
     try {
-      // Apply rate limiting delay
-      await this.enforceRateLimit();
-
-      // First, get the user ID
       const userId = await this.getUserId(username);
       if (!userId) {
-        console.warn(`Could not find user ID for @${username}`);
+        this.logger.warn('Could not find user ID', { username });
         return [];
       }
 
-      // Apply rate limiting delay again before fetching tweets
-      await this.enforceRateLimit();
-
-      // Fetch recent tweets
       const url = `${this.baseUrl}/users/${userId}/tweets`;
-      const response = await axios.get<TwitterResponse>(url, {
-        headers: {
-          Authorization: `Bearer ${this.bearerToken}`,
-        },
-        params: {
-          max_results: this.maxResults,
-          'tweet.fields': 'created_at,public_metrics,entities,referenced_tweets',
-          exclude: 'retweets,replies',
-        },
-      });
-
-      // Update rate limit from headers
-      this.updateRateLimitFromHeaders(response.headers);
+      const response = await withRateLimit(this.rateLimiter, () =>
+        axios.get<TwitterResponse>(url, {
+          headers: {
+            Authorization: `Bearer ${this.bearerToken}`,
+          },
+          params: {
+            max_results: this.maxResults,
+            'tweet.fields': 'created_at,public_metrics,entities,referenced_tweets',
+            exclude: 'retweets,replies',
+          },
+        }),
+      );
 
       return this.transformTweets(response.data.data || [], username);
     } catch (error) {
       if (axios.isAxiosError(error) && error.response?.status === 429) {
-        console.warn(`Rate limited when fetching @${username}`);
-        this.handleRateLimit(error.response.headers);
+        this.logger.warn('Rate limited', { username });
       }
       return [];
     }
@@ -236,50 +225,42 @@ export class TwitterNewsService implements NewsService {
 
   private async searchTweets(): Promise<NewsItem[]> {
     try {
-      // Apply rate limiting delay
-      await this.enforceRateLimit();
-
-      // Build search query
       const query = this.buildSearchQuery();
 
       const url = `${this.baseUrl}/tweets/search/recent`;
-      const response = await axios.get<TwitterResponse>(url, {
-        headers: {
-          Authorization: `Bearer ${this.bearerToken}`,
-        },
-        params: {
-          query: query,
-          max_results: this.maxResults * 2, // Get more for filtering
-          'tweet.fields': 'created_at,public_metrics,entities,author_id',
-          'user.fields': 'username,name',
-          expansions: 'author_id',
-        },
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        axios.get<TwitterResponse>(url, {
+          headers: {
+            Authorization: `Bearer ${this.bearerToken}`,
+          },
+          params: {
+            query: query,
+            max_results: this.maxResults * 2,
+            'tweet.fields': 'created_at,public_metrics,entities,author_id',
+            'user.fields': 'username,name',
+            expansions: 'author_id',
+          },
+        }),
+      );
 
       const tweets = response.data.data || [];
       const users = response.data.includes?.users || [];
 
-      // Map author information
       const userMap = new Map(users.map((u) => [u.id, u]));
 
       return this.transformTweets(tweets, undefined, userMap);
     } catch (error) {
-      console.error('Twitter search failed:', error);
+      this.logger.error('Twitter search failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return [];
     }
   }
 
   private buildSearchQuery(): string {
-    // Build an OR query for keywords
     const keywordQuery = this.searchKeywords.map((k) => `"${k}"`).join(' OR ');
 
-    // Add filters
-    const filters = [
-      '-is:retweet', // Exclude retweets
-      '-is:reply', // Exclude replies
-      'lang:en', // English only
-      'has:links OR has:media', // Prefer tweets with links/media
-    ].join(' ');
+    const filters = ['-is:retweet', '-is:reply', 'lang:en', 'has:links OR has:media'].join(' ');
 
     return `(${keywordQuery}) ${filters}`;
   }
@@ -287,11 +268,13 @@ export class TwitterNewsService implements NewsService {
   private async getUserId(username: string): Promise<string | null> {
     try {
       const url = `${this.baseUrl}/users/by/username/${username}`;
-      const response = await axios.get(url, {
-        headers: {
-          Authorization: `Bearer ${this.bearerToken}`,
-        },
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        axios.get(url, {
+          headers: {
+            Authorization: `Bearer ${this.bearerToken}`,
+          },
+        }),
+      );
       return response.data.data?.id || null;
     } catch {
       return null;
@@ -306,12 +289,10 @@ export class TwitterNewsService implements NewsService {
     const newsItems: NewsItem[] = [];
 
     for (const tweet of tweets) {
-      // Skip if already processed
       if (this.processedTweetIds.has(tweet.id)) {
         continue;
       }
 
-      // Skip if low engagement
       const engagement =
         (tweet.public_metrics?.like_count || 0) + (tweet.public_metrics?.retweet_count || 0);
       if (engagement < this.minEngagement) {
@@ -320,7 +301,6 @@ export class TwitterNewsService implements NewsService {
 
       this.processedTweetIds.add(tweet.id);
 
-      // Get author info
       let author = defaultAuthor || 'Twitter';
       if (userMap && tweet.author_id) {
         const user = userMap.get(tweet.author_id);
@@ -329,7 +309,6 @@ export class TwitterNewsService implements NewsService {
         }
       }
 
-      // Extract URLs
       const urls = tweet.entities?.urls || [];
       const primaryUrl =
         urls.length > 0 ? urls[0].expanded_url : `https://twitter.com/${author}/status/${tweet.id}`;
@@ -362,14 +341,11 @@ export class TwitterNewsService implements NewsService {
   }
 
   private extractTitle(text: string): string {
-    // Extract the first sentence or line as title
     const lines = text.split('\n');
     let title = lines[0];
 
-    // Clean up common prefixes
     title = title.replace(/^(BREAKING|URGENT|JUST IN|UPDATE):?\s*/i, '');
 
-    // Truncate if too long
     if (title.length > 100) {
       title = title.substring(0, 97) + '...';
     }
@@ -380,12 +356,10 @@ export class TwitterNewsService implements NewsService {
   private extractTags(tweet: Tweet): string[] {
     const tags: string[] = ['twitter'];
 
-    // Add hashtags
     if (tweet.entities?.hashtags) {
       tags.push(...tweet.entities.hashtags.map((h) => h.tag.toLowerCase()));
     }
 
-    // Extract keywords from text
     const text = tweet.text.toLowerCase();
     const keywords = [
       'breaking',
@@ -414,12 +388,10 @@ export class TwitterNewsService implements NewsService {
   private calculateImportance(tweet: Tweet, engagement: number): 'low' | 'medium' | 'high' {
     const text = tweet.text.toUpperCase();
 
-    // High importance indicators
     if (text.includes('BREAKING') || text.includes('URGENT') || engagement > 1000) {
       return 'high';
     }
 
-    // Medium importance
     if (text.includes('UPDATE') || text.includes('ALERT') || engagement > 100) {
       return 'medium';
     }
@@ -447,7 +419,6 @@ export class TwitterNewsService implements NewsService {
     try {
       let searchQuery = query;
 
-      // Add date filters if provided
       if (from) {
         searchQuery += ` since:${from.toISOString().split('T')[0]}`;
       }
@@ -456,31 +427,34 @@ export class TwitterNewsService implements NewsService {
       }
 
       const url = `${this.baseUrl}/tweets/search/recent`;
-      const response = await axios.get<TwitterResponse>(url, {
-        headers: {
-          Authorization: `Bearer ${this.bearerToken}`,
-        },
-        params: {
-          query: searchQuery + ' -is:retweet -is:reply',
-          max_results: 50,
-          'tweet.fields': 'created_at,public_metrics,entities,author_id',
-          'user.fields': 'username',
-          expansions: 'author_id',
-        },
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        axios.get<TwitterResponse>(url, {
+          headers: {
+            Authorization: `Bearer ${this.bearerToken}`,
+          },
+          params: {
+            query: searchQuery + ' -is:retweet -is:reply',
+            max_results: 50,
+            'tweet.fields': 'created_at,public_metrics,entities,author_id',
+            'user.fields': 'username',
+            expansions: 'author_id',
+          },
+        }),
+      );
 
       const users = response.data.includes?.users || [];
       const userMap = new Map(users.map((u) => [u.id, u]));
 
       return this.transformTweets(response.data.data || [], undefined, userMap);
     } catch (error) {
-      console.error('Twitter search failed:', error);
+      this.logger.error('Twitter search failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return [];
     }
   }
 
   private getMockNews(): NewsItem[] {
-    // Return mock news when no API key is provided
     const mockTweets = [
       {
         id: 'mock_1',
@@ -516,40 +490,9 @@ export class TwitterNewsService implements NewsService {
     }));
   }
 
-  private async enforceRateLimit(): Promise<void> {
-    const now = Date.now();
-    const timeSinceLastCall = now - this.lastApiCallTime;
-
-    if (timeSinceLastCall < this.apiCallDelayMs) {
-      const waitTime = this.apiCallDelayMs - timeSinceLastCall;
-      console.log(`Twitter API rate limiting: waiting ${waitTime}ms`);
-      await new Promise((resolve) => setTimeout(resolve, waitTime));
-    }
-
-    this.lastApiCallTime = Date.now();
-  }
-
-  private updateRateLimitFromHeaders(headers: Record<string, unknown>): void {
-    const remaining = headers['x-rate-limit-remaining'];
-    const reset = headers['x-rate-limit-reset'];
-
-    if (remaining !== undefined) {
-      this.rateLimitRemaining = parseInt(String(remaining));
-    }
-    if (reset !== undefined) {
-      this.rateLimitReset = parseInt(String(reset)) * 1000;
-    }
-  }
-
-  private handleRateLimit(headers: Record<string, unknown>): void {
-    this.updateRateLimitFromHeaders(headers);
-    this.rateLimitRemaining = 0;
-    console.log(`Twitter rate limit hit. Reset at ${new Date(this.rateLimitReset).toISOString()}`);
-  }
-
   async isHealthy(): Promise<boolean> {
     if (!this.bearerToken) {
-      return true; // Mock mode is always "healthy"
+      return true;
     }
 
     try {
@@ -571,7 +514,7 @@ export class TwitterNewsService implements NewsService {
 
   async destroy(): Promise<void> {
     this.processedTweetIds.clear();
-    console.log('Twitter News Service destroyed');
+    this.logger.info('Service destroyed');
   }
 }
 

@@ -1,18 +1,7 @@
 import axios from 'axios';
 import { NewsService, NewsServiceConfig, NewsItem, NewsServicePlugin } from '../../../types';
-
-// Unused interface - commenting out to fix lint
-// interface FinnhubNewsItem {
-//   category: string;
-//   datetime: number;
-//   headline: string;
-//   id: number;
-//   image: string;
-//   related: string;
-//   source: string;
-//   summary: string;
-//   url: string;
-// }
+import { RateLimiter, withRateLimit } from '../../../utils/rateLimiter';
+import { createLogger, Logger } from '../../../utils/logger';
 
 interface FinnhubMarketNews {
   category: string;
@@ -46,8 +35,9 @@ export class FinnhubNewsService implements NewsService {
   private categories: string[] = ['general', 'forex', 'crypto', 'merger'];
   private symbols: string[] = [];
   private maxItemsPerCategory = 20;
+  private rateLimiter!: RateLimiter;
+  private logger: Logger;
 
-  // Major symbols to track for company news
   private readonly defaultSymbols = [
     'AAPL',
     'MSFT',
@@ -71,23 +61,34 @@ export class FinnhubNewsService implements NewsService {
     'AMD',
   ];
 
+  constructor() {
+    this.logger = createLogger('Finnhub');
+  }
+
   async initialize(config: NewsServiceConfig): Promise<void> {
     const customConfig = config.customConfig as Record<string, string> | undefined;
     this.apiKey = config.apiKey || customConfig?.apiKey || process.env.FINNHUB_API_KEY || '';
 
     if (!this.apiKey) {
-      console.warn('Finnhub API key not provided. Using free tier with limitations.');
-      console.warn('Get a free API key at https://finnhub.io');
-      // Use a demo key for limited functionality
+      this.logger.warn('API key not provided, using demo key with limitations');
       this.apiKey = 'demo';
     }
 
-    // Configure categories to fetch
+    // Initialize rate limiter (Finnhub free tier: 60 requests/minute)
+    this.rateLimiter = new RateLimiter(
+      {
+        minDelayMs: 1000,
+        requestsPerMinute: 60,
+        maxRetries: 3,
+        baseBackoffMs: 2000,
+      },
+      'Finnhub',
+    );
+
     if (customConfig?.categories) {
       this.categories = customConfig.categories.split(',').map((c: string) => c.trim());
     }
 
-    // Configure symbols to track
     if (customConfig?.symbols) {
       this.symbols = customConfig.symbols.split(',').map((s: string) => s.trim().toUpperCase());
     } else {
@@ -98,28 +99,33 @@ export class FinnhubNewsService implements NewsService {
       this.maxItemsPerCategory = parseInt(customConfig.maxItemsPerCategory);
     }
 
-    console.log('Finnhub News Service initialized');
-    console.log(`Categories: ${this.categories.join(', ')}`);
-    console.log(`Tracking ${this.symbols.length} company symbols`);
+    this.logger.info('Service initialized', {
+      categories: this.categories.join(', '),
+      symbolCount: this.symbols.length,
+    });
   }
 
   async fetchLatestNews(): Promise<NewsItem[]> {
     const allNews: NewsItem[] = [];
 
-    // Fetch market news by category
     for (const category of this.categories) {
       try {
         const categoryNews = await this.fetchMarketNews(category);
         allNews.push(...categoryNews);
       } catch (error) {
-        console.error(`Error fetching Finnhub ${category} news:`, error);
+        this.logger.error('Failed to fetch category news', {
+          category,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 
-    // Fetch company-specific news for top symbols
     const companyNewsPromises = this.symbols.slice(0, 5).map((symbol) =>
       this.fetchCompanyNews(symbol).catch((err) => {
-        console.error(`Error fetching news for ${symbol}:`, err);
+        this.logger.error('Failed to fetch company news', {
+          symbol,
+          error: err instanceof Error ? err.message : String(err),
+        });
         return [];
       }),
     );
@@ -127,10 +133,8 @@ export class FinnhubNewsService implements NewsService {
     const companyNewsResults = await Promise.all(companyNewsPromises);
     companyNewsResults.forEach((news) => allNews.push(...news));
 
-    // Sort by publication date
     allNews.sort((a, b) => b.publishedAt.getTime() - a.publishedAt.getTime());
 
-    // Clean up old IDs to prevent memory leak
     if (this.processedIds.size > 2000) {
       const idsArray = Array.from(this.processedIds);
       this.processedIds = new Set(idsArray.slice(-1000));
@@ -141,13 +145,15 @@ export class FinnhubNewsService implements NewsService {
 
   private async fetchMarketNews(category: string): Promise<NewsItem[]> {
     try {
-      const response = await axios.get<FinnhubMarketNews[]>(`${this.baseUrl}/news`, {
-        params: {
-          category: category,
-          token: this.apiKey,
-        },
-        timeout: 10000,
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        axios.get<FinnhubMarketNews[]>(`${this.baseUrl}/news`, {
+          params: {
+            category: category,
+            token: this.apiKey,
+          },
+          timeout: 10000,
+        }),
+      );
 
       const newsItems: NewsItem[] = [];
       const articles = response.data.slice(0, this.maxItemsPerCategory);
@@ -155,7 +161,6 @@ export class FinnhubNewsService implements NewsService {
       for (const article of articles) {
         const id = `finnhub_${category}_${article.id}`;
 
-        // Skip if already processed
         if (this.processedIds.has(id)) {
           continue;
         }
@@ -187,7 +192,7 @@ export class FinnhubNewsService implements NewsService {
       return newsItems;
     } catch (error) {
       if (axios.isAxiosError(error) && error.response?.status === 429) {
-        console.warn(`Rate limited on Finnhub ${category} news`);
+        this.logger.warn('Rate limited', { category });
       }
       return [];
     }
@@ -195,28 +200,28 @@ export class FinnhubNewsService implements NewsService {
 
   private async fetchCompanyNews(symbol: string): Promise<NewsItem[]> {
     try {
-      // Calculate date range (last 7 days)
       const to = new Date();
       const from = new Date();
       from.setDate(from.getDate() - 7);
 
-      const response = await axios.get<CompanyNews[]>(`${this.baseUrl}/company-news`, {
-        params: {
-          symbol: symbol,
-          from: from.toISOString().split('T')[0],
-          to: to.toISOString().split('T')[0],
-          token: this.apiKey,
-        },
-        timeout: 10000,
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        axios.get<CompanyNews[]>(`${this.baseUrl}/company-news`, {
+          params: {
+            symbol: symbol,
+            from: from.toISOString().split('T')[0],
+            to: to.toISOString().split('T')[0],
+            token: this.apiKey,
+          },
+          timeout: 10000,
+        }),
+      );
 
       const newsItems: NewsItem[] = [];
-      const articles = response.data.slice(0, 5); // Limit per company
+      const articles = response.data.slice(0, 5);
 
       for (const article of articles) {
         const id = `finnhub_${symbol}_${article.id}`;
 
-        // Skip if already processed
         if (this.processedIds.has(id)) {
           continue;
         }
@@ -253,8 +258,6 @@ export class FinnhubNewsService implements NewsService {
   }
 
   async searchNews(query: string, from?: Date, to?: Date): Promise<NewsItem[]> {
-    // Finnhub doesn't have a direct search endpoint
-    // We'll fetch news and filter locally
     const allNews = await this.fetchLatestNews();
 
     return allNews.filter((item) => {
@@ -272,13 +275,11 @@ export class FinnhubNewsService implements NewsService {
   private extractTags(article: FinnhubMarketNews, category: string): string[] {
     const tags: string[] = ['finnhub', category];
 
-    // Parse related symbols
     if (article.related) {
       const symbols = article.related.split(',');
       tags.push(...symbols.map((s) => s.trim().toLowerCase()));
     }
 
-    // Extract keywords from headline
     const headline = article.headline.toLowerCase();
     const keywords = [
       'earnings',
@@ -317,13 +318,11 @@ export class FinnhubNewsService implements NewsService {
       tags.push(article.category);
     }
 
-    // Parse related symbols
     if (article.related) {
       const symbols = article.related.split(',');
       tags.push(...symbols.map((s) => s.trim().toLowerCase()));
     }
 
-    // Industry/sector tags based on symbol
     const techSymbols = ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AMD', 'INTC'];
     const financeSymbols = ['JPM', 'BAC', 'GS', 'MS', 'C', 'WFC'];
 
@@ -339,7 +338,6 @@ export class FinnhubNewsService implements NewsService {
   private calculateImportance(article: FinnhubMarketNews | CompanyNews): 'low' | 'medium' | 'high' {
     const headline = article.headline.toLowerCase();
 
-    // High importance keywords
     const highImportance = [
       'breaking',
       'urgent',
@@ -363,7 +361,6 @@ export class FinnhubNewsService implements NewsService {
       }
     }
 
-    // Medium importance keywords
     const mediumImportance = [
       'announce',
       'report',
@@ -402,7 +399,7 @@ export class FinnhubNewsService implements NewsService {
 
   async destroy(): Promise<void> {
     this.processedIds.clear();
-    console.log('Finnhub News Service destroyed');
+    this.logger.info('Service destroyed');
   }
 }
 

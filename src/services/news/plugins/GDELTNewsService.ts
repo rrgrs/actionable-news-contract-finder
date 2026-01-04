@@ -1,5 +1,7 @@
 import axios from 'axios';
 import { NewsService, NewsServiceConfig, NewsItem, NewsServicePlugin } from '../../../types';
+import { RateLimiter, withRateLimit } from '../../../utils/rateLimiter';
+import { createLogger, Logger } from '../../../utils/logger';
 
 interface GDELTArticle {
   url: string;
@@ -25,17 +27,15 @@ export class GDELTNewsService implements NewsService {
   name = 'gdelt-news';
   private baseUrl = 'https://api.gdeltproject.org/api/v2';
   private processedUrls = new Set<string>();
-  // private updateInterval = 15; // GDELT updates every 15 minutes - unused
   private maxRecords = 250;
   private languages = ['english'];
   private keywords: string[] = [];
   private countries: string[] = [];
   private minTone: number | null = null;
   private maxTone: number | null = null;
+  private rateLimiter!: RateLimiter;
+  private logger: Logger;
 
-  // Financial keywords that work with GDELT's article search
-  // Note: GDELT theme filters (e.g., ECON_STOCKMARKET) don't return results reliably
-  // Keep list short - GDELT has query length limits
   private readonly defaultKeywords = [
     'federal reserve',
     'interest rate',
@@ -47,6 +47,10 @@ export class GDELTNewsService implements NewsService {
     'bankruptcy',
     'inflation',
   ];
+
+  constructor() {
+    this.logger = createLogger('GDELT');
+  }
 
   async initialize(config: NewsServiceConfig): Promise<void> {
     const customConfig = config.customConfig as Record<string, string | number> | undefined;
@@ -66,7 +70,6 @@ export class GDELTNewsService implements NewsService {
         .split(',')
         .map((k: string) => k.trim());
     } else {
-      // Use default financial keywords
       this.keywords = [...this.defaultKeywords];
     }
 
@@ -84,35 +87,43 @@ export class GDELTNewsService implements NewsService {
       this.maxTone = parseFloat(String(customConfig.maxTone));
     }
 
-    console.log('GDELT News Service initialized');
-    console.log(`Languages: ${this.languages.join(', ')}`);
-    console.log(`Monitoring ${this.keywords.length} keywords`);
-    if (this.countries.length > 0) {
-      console.log(`Countries: ${this.countries.join(', ')}`);
-    }
+    // Initialize rate limiter (GDELT is generous but we'll be conservative)
+    this.rateLimiter = new RateLimiter(
+      {
+        minDelayMs: 1000,
+        requestsPerMinute: 30,
+        maxRetries: 3,
+        baseBackoffMs: 2000,
+      },
+      'GDELT',
+    );
+
+    this.logger.info('Service initialized', {
+      languages: this.languages.join(', '),
+      keywordCount: this.keywords.length,
+      countries: this.countries.length > 0 ? this.countries.join(', ') : 'all',
+    });
   }
 
   async fetchLatestNews(): Promise<NewsItem[]> {
     const allNews: NewsItem[] = [];
 
     try {
-      // GDELT Doc API for article search
       const articles = await this.searchArticles();
       allNews.push(...articles);
 
-      // Also fetch from GDELT TV if configured
       if (this.shouldFetchTV()) {
         const tvNews = await this.fetchTVNews();
         allNews.push(...tvNews);
       }
     } catch (error) {
-      console.error('Error fetching GDELT news:', error);
+      this.logger.error('Failed to fetch news', {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
-    // Sort by publication date
     allNews.sort((a, b) => b.publishedAt.getTime() - a.publishedAt.getTime());
 
-    // Clean up old URLs to prevent memory leak
     if (this.processedUrls.size > 2000) {
       const urlsArray = Array.from(this.processedUrls);
       this.processedUrls = new Set(urlsArray.slice(-1000));
@@ -130,17 +141,14 @@ export class GDELTNewsService implements NewsService {
       sort: 'datedesc',
     };
 
-    // Add language filter
     if (this.languages.length > 0) {
       params.sourcelang = this.languages.join(' OR ');
     }
 
-    // Add country filter
     if (this.countries.length > 0) {
       params.sourcecountry = this.countries.join(' OR ');
     }
 
-    // Add tone filters
     if (this.minTone !== null) {
       params.mintone = this.minTone;
     }
@@ -149,19 +157,20 @@ export class GDELTNewsService implements NewsService {
     }
 
     try {
-      const response = await axios.get<GDELTResponse>(`${this.baseUrl}/doc/doc`, {
-        params,
-        timeout: 30000, // Increased timeout to 30 seconds for GDELT API
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        axios.get<GDELTResponse>(`${this.baseUrl}/doc/doc`, {
+          params,
+          timeout: 30000,
+        }),
+      );
 
-      // Check if response is a string (error message) instead of JSON
       if (typeof response.data === 'string') {
-        console.error('GDELT API error:', response.data);
+        this.logger.error('API returned error', { message: response.data });
         return [];
       }
 
       if (response.data.status === 'error') {
-        console.error('GDELT API error:', response.data.message);
+        this.logger.error('API error', { message: response.data.message });
         return [];
       }
 
@@ -169,12 +178,16 @@ export class GDELTNewsService implements NewsService {
       const newsItems: NewsItem[] = [];
 
       for (const article of articles) {
-        // Skip if already processed
         if (this.processedUrls.has(article.url)) {
           continue;
         }
 
         this.processedUrls.add(article.url);
+
+        // Validate date before creating NewsItem
+        const publishedAt = new Date(article.seendate);
+        const validPublishedAt =
+          publishedAt instanceof Date && !isNaN(publishedAt.getTime()) ? publishedAt : new Date();
 
         const newsItem: NewsItem = {
           id: `gdelt_${this.generateId(article.url)}`,
@@ -183,7 +196,7 @@ export class GDELTNewsService implements NewsService {
           content: await this.fetchArticleContent(article),
           summary: article.title,
           url: article.url,
-          publishedAt: new Date(article.seendate),
+          publishedAt: validPublishedAt,
           author: article.domain,
           tags: this.extractTags(article),
           metadata: {
@@ -203,27 +216,24 @@ export class GDELTNewsService implements NewsService {
 
       return newsItems;
     } catch (error) {
-      console.error('GDELT article search failed:', error);
+      this.logger.error('Article search failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return [];
     }
   }
 
   private buildQuery(): string {
-    // Build keyword-based query (GDELT theme filters don't return results reliably)
     if (this.keywords.length === 0) {
       return '("stock market" OR "federal reserve")';
     }
 
-    // Quote multi-word keywords, leave single words unquoted
     const quotedKeywords = this.keywords.map((kw) => (kw.includes(' ') ? `"${kw}"` : kw));
 
-    // GDELT requires OR queries to be wrapped in parentheses
     return `(${quotedKeywords.join(' OR ')})`;
   }
 
   private async fetchArticleContent(article: GDELTArticle): Promise<string> {
-    // GDELT doesn't provide article content directly
-    // We use the title and metadata to create a summary
     const content = [
       article.title,
       '',
@@ -255,20 +265,16 @@ export class GDELTNewsService implements NewsService {
   }
 
   private async fetchTVNews(): Promise<NewsItem[]> {
-    // GDELT TV API for broadcast news
-    // This requires additional configuration and is optional
     return [];
   }
 
   private shouldFetchTV(): boolean {
-    // TV news can be enabled via config
     return false;
   }
 
   async searchNews(query: string, from?: Date, to?: Date): Promise<NewsItem[]> {
     let searchQuery = query;
 
-    // Add date filters to query
     if (from || to) {
       const fromStr = from ? from.toISOString().split('T')[0].replace(/-/g, '') : '*';
       const toStr = to ? to.toISOString().split('T')[0].replace(/-/g, '') : '*';
@@ -281,17 +287,14 @@ export class GDELTNewsService implements NewsService {
   private extractTags(article: GDELTArticle): string[] {
     const tags: string[] = ['gdelt'];
 
-    // Add language
     if (article.language) {
       tags.push(article.language.toLowerCase());
     }
 
-    // Add country
     if (article.sourcecountry) {
       tags.push(article.sourcecountry.toLowerCase());
     }
 
-    // Parse theme for tags
     if (article.theme) {
       const themes = article.theme.split(';');
       for (const theme of themes) {
@@ -302,7 +305,6 @@ export class GDELTNewsService implements NewsService {
       }
     }
 
-    // Add tone-based tags
     if (article.tone) {
       if (article.tone > 5) {
         tags.push('positive');
@@ -311,7 +313,6 @@ export class GDELTNewsService implements NewsService {
       }
     }
 
-    // Extract keywords from title
     const title = article.title.toLowerCase();
     const keywords = [
       'breaking',
@@ -340,7 +341,6 @@ export class GDELTNewsService implements NewsService {
   private calculateImportance(article: GDELTArticle): 'low' | 'medium' | 'high' {
     const title = article.title.toLowerCase();
 
-    // High importance based on keywords
     if (
       title.includes('breaking') ||
       title.includes('urgent') ||
@@ -351,17 +351,14 @@ export class GDELTNewsService implements NewsService {
       return 'high';
     }
 
-    // High importance based on extreme tone
     if (article.tone && (article.tone > 10 || article.tone < -10)) {
       return 'high';
     }
 
-    // High importance based on Goldstein scale (conflict/cooperation measure)
     if (article.goldsteinscale && Math.abs(article.goldsteinscale) > 8) {
       return 'high';
     }
 
-    // Medium importance
     if (
       title.includes('announce') ||
       title.includes('report') ||
@@ -402,7 +399,7 @@ export class GDELTNewsService implements NewsService {
 
   async destroy(): Promise<void> {
     this.processedUrls.clear();
-    console.log('GDELT News Service destroyed');
+    this.logger.info('Service destroyed');
   }
 }
 

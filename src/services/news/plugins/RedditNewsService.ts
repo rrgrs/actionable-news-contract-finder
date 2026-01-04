@@ -1,5 +1,7 @@
 import axios from 'axios';
 import { NewsService, NewsServiceConfig, NewsItem, NewsServicePlugin } from '../../../types';
+import { RateLimiter, withRateLimit } from '../../../utils/rateLimiter';
+import { createLogger, Logger } from '../../../utils/logger';
 
 interface RedditPost {
   data: {
@@ -30,18 +32,20 @@ export class RedditNewsService implements NewsService {
   private userAgent = 'Actionable-News-Bot/1.0';
   private baseUrl = 'https://www.reddit.com';
   private lastFetchedIds = new Set<string>();
-  private pollInterval = 30000; // 30 seconds default
-  private minScore = 10; // Minimum upvotes to consider
+  private minScore = 10;
   private sortBy: 'new' | 'hot' | 'rising' = 'new';
+  private rateLimiter!: RateLimiter;
+  private logger: Logger;
+
+  constructor() {
+    this.logger = createLogger('Reddit');
+  }
 
   async initialize(config: NewsServiceConfig): Promise<void> {
     const customConfig = config.customConfig as Record<string, string> | undefined;
 
     if (customConfig?.subreddits) {
       this.subreddits = customConfig.subreddits.split(',').map((s: string) => s.trim());
-    }
-    if (customConfig?.pollInterval) {
-      this.pollInterval = parseInt(customConfig.pollInterval);
     }
     if (customConfig?.minScore) {
       this.minScore = parseInt(customConfig.minScore);
@@ -50,10 +54,22 @@ export class RedditNewsService implements NewsService {
       this.sortBy = customConfig.sortBy as 'new' | 'hot' | 'rising';
     }
 
-    console.log(`Reddit News Service initialized with subreddits: ${this.subreddits.join(', ')}`);
-    console.log(
-      `Poll interval: ${this.pollInterval}ms, Min score: ${this.minScore}, Sort: ${this.sortBy}`,
+    // Initialize rate limiter (Reddit API: ~60 requests/minute for unauthenticated)
+    this.rateLimiter = new RateLimiter(
+      {
+        minDelayMs: 1000,
+        requestsPerMinute: 60,
+        maxRetries: 3,
+        baseBackoffMs: 2000,
+      },
+      'Reddit',
     );
+
+    this.logger.info('Service initialized', {
+      subreddits: this.subreddits.join(', '),
+      minScore: this.minScore,
+      sortBy: this.sortBy,
+    });
   }
 
   async fetchLatestNews(): Promise<NewsItem[]> {
@@ -64,14 +80,15 @@ export class RedditNewsService implements NewsService {
         const news = await this.fetchFromSubreddit(subreddit);
         allNews.push(...news);
       } catch (error) {
-        console.error(`Error fetching from r/${subreddit}:`, error);
+        this.logger.error('Failed to fetch from subreddit', {
+          subreddit,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 
-    // Sort by publication time (newest first)
     allNews.sort((a, b) => b.publishedAt.getTime() - a.publishedAt.getTime());
 
-    // Clean up old IDs to prevent memory leak
     if (this.lastFetchedIds.size > 1000) {
       const idsArray = Array.from(this.lastFetchedIds);
       this.lastFetchedIds = new Set(idsArray.slice(-500));
@@ -84,15 +101,17 @@ export class RedditNewsService implements NewsService {
     const url = `${this.baseUrl}/r/${subreddit}/${this.sortBy}.json`;
 
     try {
-      const response = await axios.get<RedditResponse>(url, {
-        headers: {
-          'User-Agent': this.userAgent,
-        },
-        params: {
-          limit: 25,
-          raw_json: 1,
-        },
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        axios.get<RedditResponse>(url, {
+          headers: {
+            'User-Agent': this.userAgent,
+          },
+          params: {
+            limit: 25,
+            raw_json: 1,
+          },
+        }),
+      );
 
       const posts = response.data.data.children;
       const newsItems: NewsItem[] = [];
@@ -100,18 +119,14 @@ export class RedditNewsService implements NewsService {
       for (const post of posts) {
         const postData = post.data;
 
-        // Filter by score and check if already processed
         if (postData.score < this.minScore || this.lastFetchedIds.has(postData.id)) {
           continue;
         }
 
-        // Mark as processed
         this.lastFetchedIds.add(postData.id);
 
-        // Extract content - use selftext if available, otherwise title
         const content = postData.selftext || postData.title;
 
-        // Build the news item
         const newsItem: NewsItem = {
           id: `reddit_${postData.id}`,
           source: `Reddit r/${postData.subreddit}`,
@@ -138,9 +153,12 @@ export class RedditNewsService implements NewsService {
       return newsItems;
     } catch (error) {
       if (axios.isAxiosError(error) && error.response?.status === 429) {
-        console.warn(`Rate limited on r/${subreddit}, will retry next cycle`);
+        this.logger.warn('Rate limited', { subreddit });
       } else {
-        console.error(`Failed to fetch from r/${subreddit}:`, error);
+        this.logger.error('Failed to fetch', {
+          subreddit,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
       return [];
     }
@@ -151,18 +169,20 @@ export class RedditNewsService implements NewsService {
     const allResults: NewsItem[] = [];
 
     try {
-      const response = await axios.get<RedditResponse>(searchUrl, {
-        headers: {
-          'User-Agent': this.userAgent,
-        },
-        params: {
-          q: query,
-          sort: 'new',
-          limit: 50,
-          type: 'link',
-          raw_json: 1,
-        },
-      });
+      const response = await withRateLimit(this.rateLimiter, () =>
+        axios.get<RedditResponse>(searchUrl, {
+          headers: {
+            'User-Agent': this.userAgent,
+          },
+          params: {
+            q: query,
+            sort: 'new',
+            limit: 50,
+            type: 'link',
+            raw_json: 1,
+          },
+        }),
+      );
 
       const posts = response.data.data.children;
 
@@ -170,7 +190,6 @@ export class RedditNewsService implements NewsService {
         const postData = post.data;
         const publishedAt = new Date(postData.created_utc * 1000);
 
-        // Apply date filters if provided
         if (from && publishedAt < from) {
           continue;
         }
@@ -202,25 +221,25 @@ export class RedditNewsService implements NewsService {
 
       return allResults;
     } catch (error) {
-      console.error('Reddit search failed:', error);
+      this.logger.error('Search failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return [];
     }
   }
 
   private cleanTitle(title: string): string {
-    // Remove common Reddit title artifacts
     return title
-      .replace(/\[.*?\]/g, '') // Remove bracketed tags
+      .replace(/\[.*?\]/g, '')
       .replace(/BREAKING:?/gi, '')
       .replace(/UPDATE:?/gi, '')
       .trim();
   }
 
   private cleanContent(content: string): string {
-    // Clean up Reddit text formatting
     return content
-      .replace(/&#x200B;/g, '') // Remove zero-width spaces
-      .replace(/\n{3,}/g, '\n\n') // Collapse multiple newlines
+      .replace(/&#x200B;/g, '')
+      .replace(/\n{3,}/g, '\n\n')
       .trim();
   }
 
@@ -243,18 +262,14 @@ export class RedditNewsService implements NewsService {
   private extractTags(post: RedditPost['data']): string[] {
     const tags: string[] = [];
 
-    // Add subreddit as tag
     tags.push(post.subreddit);
 
-    // Add flair as tag if present
     if (post.link_flair_text) {
       tags.push(post.link_flair_text.toLowerCase());
     }
 
-    // Extract potential tags from title
     const title = post.title.toLowerCase();
 
-    // Common news keywords to tag
     const keywords = [
       'breaking',
       'urgent',
@@ -281,17 +296,15 @@ export class RedditNewsService implements NewsService {
       }
     }
 
-    return [...new Set(tags)]; // Remove duplicates
+    return [...new Set(tags)];
   }
 
   private calculateImportance(post: RedditPost['data']): 'low' | 'medium' | 'high' {
-    // Calculate importance based on engagement metrics
     const score = post.score;
     const comments = post.num_comments;
     const age = Date.now() - post.created_utc * 1000;
     const ageHours = age / (1000 * 60 * 60);
 
-    // Velocity metric: engagement per hour
     const velocity = (score + comments * 2) / Math.max(ageHours, 0.5);
 
     if (velocity > 500 || score > 1000) {
@@ -317,7 +330,7 @@ export class RedditNewsService implements NewsService {
 
   async destroy(): Promise<void> {
     this.lastFetchedIds.clear();
-    console.log('Reddit News Service destroyed');
+    this.logger.info('Service destroyed');
   }
 }
 
