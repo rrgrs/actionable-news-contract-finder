@@ -96,15 +96,23 @@ export interface ContractValidation {
   opportunities: string[];
 }
 
+export interface ContractWithContext {
+  contract: import('./betting.types').Contract;
+  marketTitle: string;
+  similarity?: number;
+}
+
 export interface ContractValidator {
   validateContract(
     contract: import('./betting.types').Contract,
     newsInsight: ParsedNewsInsight,
     llmProvider: LLMProvider,
+    marketTitle?: string,
+    similarity?: number,
   ): Promise<ContractValidation>;
 
   batchValidateContracts(
-    contracts: import('./betting.types').Contract[],
+    contractsWithContext: ContractWithContext[],
     newsInsight: ParsedNewsInsight,
     llmProvider: LLMProvider,
   ): Promise<ContractValidation[]>;

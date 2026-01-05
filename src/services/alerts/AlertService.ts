@@ -2,6 +2,7 @@ import { AlertConfig } from '../../config/types';
 import * as nodemailer from 'nodemailer';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { WebClient } from '@slack/web-api';
 
 const execAsync = promisify(exec);
 
@@ -21,15 +22,17 @@ export interface AlertPayload {
 export class AlertService {
   private config: AlertConfig;
   private emailTransporter?: nodemailer.Transporter;
+  private slackClient?: WebClient;
   private alertHistory: Map<string, Date> = new Map(); // Track when we last alerted for a market
 
   constructor(config: AlertConfig) {
     this.config = config;
     this.initializeEmailTransporter();
+    this.initializeSlackClient();
   }
 
   private initializeEmailTransporter(): void {
-    if (this.config.type === 'email' || this.config.type === 'both') {
+    if (this.config.type === 'email' || this.config.type === 'both' || this.config.type === 'all') {
       if (!this.config.emailConfig) {
         console.warn('Email alerts configured but email settings not provided');
         return;
@@ -57,6 +60,24 @@ export class AlertService {
     }
   }
 
+  private initializeSlackClient(): void {
+    if (this.config.type === 'slack' || this.config.type === 'all') {
+      if (!this.config.slackConfig) {
+        console.warn('Slack alerts configured but Slack settings not provided');
+        return;
+      }
+
+      const { botToken } = this.config.slackConfig;
+
+      if (!botToken) {
+        console.warn('Slack alerts configured but bot token not provided');
+        return;
+      }
+
+      this.slackClient = new WebClient(botToken);
+    }
+  }
+
   async sendAlert(payload: AlertPayload): Promise<void> {
     // Check confidence threshold
     if (
@@ -78,12 +99,20 @@ export class AlertService {
     // Send alerts based on configuration
     const promises: Promise<void>[] = [];
 
-    if (this.config.type === 'email' || this.config.type === 'both') {
+    if (this.config.type === 'email' || this.config.type === 'both' || this.config.type === 'all') {
       promises.push(this.sendEmailAlert(payload));
     }
 
-    if (this.config.type === 'system' || this.config.type === 'both') {
+    if (
+      this.config.type === 'system' ||
+      this.config.type === 'both' ||
+      this.config.type === 'all'
+    ) {
       promises.push(this.sendSystemAlert(payload));
+    }
+
+    if (this.config.type === 'slack' || this.config.type === 'all') {
+      promises.push(this.sendSlackAlert(payload));
     }
 
     await Promise.all(promises);
@@ -217,13 +246,116 @@ Alert generated at ${payload.timestamp.toLocaleString()}
     }
   }
 
+  private async sendSlackAlert(payload: AlertPayload): Promise<void> {
+    if (!this.slackClient || !this.config.slackConfig) {
+      console.warn('Slack client not initialized, skipping Slack alert');
+      return;
+    }
+
+    const { channelId } = this.config.slackConfig;
+    const positionColor = payload.suggestedPosition === 'buy' ? '#36a64f' : '#dc3545';
+    const positionEmoji =
+      payload.suggestedPosition === 'buy'
+        ? ':chart_with_upwards_trend:'
+        : ':chart_with_downwards_trend:';
+
+    try {
+      await this.slackClient.chat.postMessage({
+        channel: channelId,
+        text: `Trading Opportunity: ${payload.marketTitle}`,
+        blocks: [
+          {
+            type: 'header',
+            text: {
+              type: 'plain_text',
+              text: `🎯 Trading Opportunity Found`,
+              emoji: true,
+            },
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*📰 News Event*\n<${payload.newsUrl}|${payload.newsTitle}>`,
+            },
+          },
+          {
+            type: 'divider',
+          },
+          {
+            type: 'section',
+            fields: [
+              {
+                type: 'mrkdwn',
+                text: `*Market:*\n<${payload.marketUrl}|${payload.marketTitle}>`,
+              },
+              {
+                type: 'mrkdwn',
+                text: `*Contract:*\n${payload.contractTitle}`,
+              },
+            ],
+          },
+          {
+            type: 'section',
+            fields: [
+              {
+                type: 'mrkdwn',
+                text: `*Current Price:*\n$${payload.currentPrice.toFixed(2)}`,
+              },
+              {
+                type: 'mrkdwn',
+                text: `*Confidence:*\n${Math.round(payload.confidence * 100)}%`,
+              },
+            ],
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `${positionEmoji} *Suggested Position:* *${payload.suggestedPosition.toUpperCase()}*`,
+            },
+          },
+          {
+            type: 'divider',
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*💡 Analysis*\n${payload.reasoning}`,
+            },
+          },
+          {
+            type: 'context',
+            elements: [
+              {
+                type: 'mrkdwn',
+                text: `Alert generated at ${payload.timestamp.toLocaleString()} | Actionable News Contract Finder`,
+              },
+            ],
+          },
+        ],
+        attachments: [
+          {
+            color: positionColor,
+            blocks: [],
+          },
+        ],
+      });
+
+      console.log(`💬 Slack alert sent to channel ${channelId}`);
+    } catch (error) {
+      console.error('Failed to send Slack alert:', error);
+    }
+  }
+
   async testConnection(): Promise<boolean> {
     if (this.config.type === 'none') {
       console.log('Alerts disabled');
       return true;
     }
 
-    if (this.config.type === 'email' || this.config.type === 'both') {
+    if (this.config.type === 'email' || this.config.type === 'both' || this.config.type === 'all') {
       if (this.emailTransporter) {
         try {
           await this.emailTransporter.verify();
@@ -235,7 +367,11 @@ Alert generated at ${payload.timestamp.toLocaleString()}
       }
     }
 
-    if (this.config.type === 'system' || this.config.type === 'both') {
+    if (
+      this.config.type === 'system' ||
+      this.config.type === 'both' ||
+      this.config.type === 'all'
+    ) {
       // Test system notification
       try {
         await this.sendSystemAlert({
@@ -253,6 +389,19 @@ Alert generated at ${payload.timestamp.toLocaleString()}
       } catch (error) {
         console.error('❌ System alert test failed:', error);
         return false;
+      }
+    }
+
+    if (this.config.type === 'slack' || this.config.type === 'all') {
+      if (this.slackClient && this.config.slackConfig) {
+        try {
+          // Test Slack connection by sending a test message
+          const result = await this.slackClient.auth.test();
+          console.log(`✅ Slack connection verified (bot: ${result.user})`);
+        } catch (error) {
+          console.error('❌ Slack connection failed:', error);
+          return false;
+        }
       }
     }
 

@@ -1,7 +1,7 @@
 import { PolymarketPlatform, PolymarketPlatformPlugin } from '../PolymarketPlatform';
 import axios from 'axios';
 import { ethers } from 'ethers';
-import { BettingPlatformConfig, Order } from '../../../../types';
+import { BettingPlatformConfig } from '../../../../types';
 
 jest.mock('axios');
 jest.mock('ethers');
@@ -50,9 +50,8 @@ describe('PolymarketPlatform', () => {
       .mockReturnValueOnce(mockDataClient);
 
     // Mock ethers Wallet
-    (mockedEthers.Wallet as unknown as jest.Mock) = jest.fn().mockImplementation(() => ({
-      address: '0x1234567890123456789012345678901234567890',
-      signMessage: jest.fn().mockResolvedValue('mock-signature'),
+    (mockedEthers.Wallet as unknown as jest.Mock).mockImplementation(() => ({
+      address: '0x1234567890abcdef1234567890abcdef12345678',
     }));
   });
 
@@ -61,45 +60,32 @@ describe('PolymarketPlatform', () => {
   });
 
   describe('initialize', () => {
-    it('should initialize with API credentials and private key', async () => {
+    it('should initialize in read-only mode without credentials', async () => {
+      const config: BettingPlatformConfig = {
+        name: 'polymarket',
+      };
+
+      await platform.initialize(config);
+
+      expect(mockedAxios.create).toHaveBeenCalledTimes(2);
+    });
+
+    it('should initialize with API credentials', async () => {
       const config: BettingPlatformConfig = {
         name: 'polymarket',
         apiKey: 'test-api-key',
         apiSecret: 'test-api-secret',
         customConfig: {
-          privateKey: 'test-private-key',
+          privateKey: '0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
         },
       };
 
       await platform.initialize(config);
 
       expect(mockedAxios.create).toHaveBeenCalledTimes(2);
-      expect(mockedAxios.create).toHaveBeenCalledWith({
-        baseURL: 'https://clob.polymarket.com',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        timeout: 15000,
-      });
-
-      expect(mockAxiosInstance.defaults.headers.common['Authorization']).toBe(
-        'Bearer test-api-key',
-      );
-      expect(mockAxiosInstance.defaults.headers.common['X-Api-Secret']).toBe('test-api-secret');
     });
 
-    it('should work in read-only mode without credentials', async () => {
-      const config: BettingPlatformConfig = {
-        name: 'polymarket',
-      };
-
-      await platform.initialize(config);
-
-      expect(mockedAxios.create).toHaveBeenCalledTimes(2);
-      expect(mockAxiosInstance.defaults.headers.common['Authorization']).toBeUndefined();
-    });
-
-    it('should throw error if API key provided without private key', async () => {
+    it('should throw if private key is missing but API credentials provided', async () => {
       const config: BettingPlatformConfig = {
         name: 'polymarket',
         apiKey: 'test-api-key',
@@ -112,7 +98,7 @@ describe('PolymarketPlatform', () => {
     });
   });
 
-  describe('getAvailableContracts', () => {
+  describe('getMarkets', () => {
     beforeEach(async () => {
       const config: BettingPlatformConfig = {
         name: 'polymarket',
@@ -120,333 +106,97 @@ describe('PolymarketPlatform', () => {
       await platform.initialize(config);
     });
 
-    it('should fetch and convert available contracts', async () => {
-      const mockMarkets = {
-        data: [
-          {
-            id: 'market-123',
-            question: 'Will Bitcoin reach $100,000 by end of 2024?',
-            conditionId: 'condition-123',
-            slug: 'bitcoin-100k-2024',
-            resolutionSource: 'CoinGecko',
-            endDate: '2024-12-31T23:59:59Z',
-            liquidity: '50000',
-            volume: '1000000',
-            volume24hr: '100000',
-            clobTokenIds: ['token-yes', 'token-no'],
-            outcomes: ['Yes', 'No'],
-            outcomePrices: ['0.25', '0.75'],
-            minimum_order_size: 1,
-            minimum_tick_size: 0.01,
-            description: 'Resolution based on CoinGecko price',
-            tags: ['crypto', 'bitcoin'],
-            active: true,
-            closed: false,
-            archived: false,
-            accepting_orders: true,
-            resolved: false,
-          },
-        ],
-      };
-
-      mockDataClient.get.mockResolvedValueOnce(mockMarkets);
-
-      const contracts = await platform.getAvailableContracts();
-
-      expect(contracts).toHaveLength(1);
-      expect(contracts[0]).toMatchObject({
-        id: 'market-123',
-        platform: 'polymarket',
-        title: 'Will Bitcoin reach $100,000 by end of 2024?',
-        yesPrice: 0.25,
-        noPrice: 0.75,
-        volume: 1000000,
-        liquidity: 50000,
-      });
-    });
-
-    it('should skip resolved markets', async () => {
-      const mockMarkets = {
-        data: [
-          {
-            id: 'market-resolved',
-            question: 'Resolved market',
-            resolved: true,
-            outcomePrices: ['1', '0'],
-          },
-          {
-            id: 'market-active',
-            question: 'Active market',
-            resolved: false,
-            outcomePrices: ['0.5', '0.5'],
-            active: true,
-            closed: false,
-          },
-        ],
-      };
-
-      mockDataClient.get.mockResolvedValueOnce(mockMarkets);
-
-      const contracts = await platform.getAvailableContracts();
-
-      expect(contracts).toHaveLength(1);
-      expect(contracts[0].id).toBe('market-active');
-    });
-  });
-
-  describe('placeOrder', () => {
-    beforeEach(async () => {
-      const config: BettingPlatformConfig = {
-        name: 'polymarket',
-        apiKey: 'test-api-key',
-        apiSecret: 'test-api-secret',
-        customConfig: {
-          privateKey: 'test-private-key',
-        },
-      };
-      await platform.initialize(config);
-    });
-
-    it('should place a market order', async () => {
-      const order: Order = {
-        contractId: 'market-123',
-        platform: 'polymarket',
-        side: 'yes',
-        quantity: 100,
-        orderType: 'market',
-      };
-
-      // Mock getContract call
-      mockDataClient.get.mockResolvedValueOnce({
-        data: {
-          id: 'market-123',
-          clobTokenIds: ['token-yes', 'token-no'],
-          outcomePrices: ['0.3', '0.7'],
-        },
-      });
-
-      // Mock order placement
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          id: 'order-123',
-          status: 'FILLED',
-          filled_size: '100',
-          average_price: '0.3',
-          created_at: '2024-01-01T00:00:00Z',
-        },
-      });
-
-      const result = await platform.placeOrder(order);
-
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/orders', {
-        market: 'market-123',
-        asset_id: 'token-yes',
-        side: 'BUY',
-        size: '100',
-        price: '0.3',
-        type: 'MARKET',
-        client_order_id: expect.stringContaining('ancf_'),
-        signature: 'mock-signature',
-        address: '0x1234567890123456789012345678901234567890',
-      });
-
-      expect(result).toMatchObject({
-        orderId: 'order-123',
-        status: 'filled',
-        filledQuantity: 100,
-        averagePrice: 0.3,
-      });
-    });
-
-    it('should place a limit order', async () => {
-      const order: Order = {
-        contractId: 'market-123',
-        platform: 'polymarket',
-        side: 'no',
-        quantity: 50,
-        orderType: 'limit',
-        limitPrice: 0.65,
-      };
-
-      // Mock getContract call
-      mockDataClient.get.mockResolvedValueOnce({
-        data: {
-          id: 'market-123',
-          clobTokenIds: ['token-yes', 'token-no'],
-          outcomePrices: ['0.3', '0.7'],
-        },
-      });
-
-      // Mock order placement
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          id: 'order-456',
-          status: 'OPEN',
-          filled_size: '0',
-          created_at: '2024-01-01T00:00:00Z',
-        },
-      });
-
-      const result = await platform.placeOrder(order);
-
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/orders', {
-        market: 'market-123',
-        asset_id: 'token-no',
-        side: 'BUY',
-        size: '50',
-        price: '0.65',
-        type: 'LIMIT',
-        client_order_id: expect.stringContaining('ancf_'),
-        signature: 'mock-signature',
-        address: '0x1234567890123456789012345678901234567890',
-      });
-
-      expect(result.status).toBe('pending');
-    });
-
-    it('should throw error without credentials', async () => {
-      const platformReadOnly = new PolymarketPlatform();
-      await platformReadOnly.initialize({ name: 'polymarket' });
-
-      const order: Order = {
-        contractId: 'market-123',
-        platform: 'polymarket',
-        side: 'yes',
-        quantity: 100,
-        orderType: 'market',
-      };
-
-      await expect(platformReadOnly.placeOrder(order)).rejects.toThrow(
-        'Polymarket trading requires API credentials and private key',
-      );
-    });
-  });
-
-  describe('getPositions', () => {
-    it('should fetch and convert positions', async () => {
-      const config: BettingPlatformConfig = {
-        name: 'polymarket',
-        apiKey: 'test-api-key',
-        apiSecret: 'test-api-secret',
-        customConfig: {
-          privateKey: 'test-private-key',
-        },
-      };
-      await platform.initialize(config);
-
-      mockAxiosInstance.get.mockResolvedValueOnce({
-        data: [
-          {
-            market: 'market-123',
-            asset_id: 'token-yes',
-            position: '100',
-            average_price: '0.25',
-            realized_pnl: '10',
-            unrealized_pnl: '15',
-          },
-        ],
-      });
-
-      // Mock getContract call
-      mockDataClient.get.mockResolvedValueOnce({
-        data: {
-          id: 'market-123',
-          clobTokenIds: ['token-yes', 'token-no'],
-          outcomePrices: ['0.3', '0.7'],
-        },
-      });
-
-      const positions = await platform.getPositions();
-
-      expect(positions).toHaveLength(1);
-      expect(positions[0]).toMatchObject({
-        contractId: 'market-123',
-        platform: 'polymarket',
-        quantity: 100,
-        side: 'yes',
-        averagePrice: 0.25,
-        currentPrice: 0.3,
-        unrealizedPnl: 15,
-        realizedPnl: 10,
-      });
-    });
-
-    it('should return empty array without credentials', async () => {
-      const config: BettingPlatformConfig = {
-        name: 'polymarket',
-      };
-      await platform.initialize(config);
-
-      const positions = await platform.getPositions();
-
-      expect(positions).toEqual([]);
-    });
-  });
-
-  describe('getMarketResolution', () => {
-    beforeEach(async () => {
-      const config: BettingPlatformConfig = {
-        name: 'polymarket',
-      };
-      await platform.initialize(config);
-    });
-
-    it('should return resolution for resolved market', async () => {
-      mockDataClient.get.mockResolvedValueOnce({
-        data: {
-          id: 'market-123',
-          question: 'Will this happen?',
-          conditionId: 'condition-123',
-          slug: 'will-this-happen',
-          resolutionSource: 'polymarket',
-          endDate: '2025-01-01T00:00:00Z',
-          outcomePrices: ['1.00', '0.00'],
-          outcomes: ['Yes', 'No'],
-          volume: '100000',
-          volume24hr: '10000',
+    it('should fetch and convert markets correctly', async () => {
+      const mockMarkets = [
+        {
+          id: 'market-1',
+          question: 'Will Bitcoin reach $100k?',
+          conditionId: 'cond-1',
+          slug: 'bitcoin-100k',
+          resolutionSource: 'https://example.com',
+          endDate: '2025-12-31T00:00:00Z',
           liquidity: '50000',
-          clobTokenIds: ['token1', 'token2'],
-          active: false,
-          accepting_orders: false,
-          resolved: true,
-          resolvedOutcome: 'Yes',
-        },
-      });
-
-      const resolution = await platform.getMarketResolution('market-123');
-
-      expect(resolution).toMatchObject({
-        contractId: 'market-123',
-        resolved: true,
-        outcome: 'yes',
-        settlementPrice: 1,
-      });
-    });
-
-    it('should return null for unresolved market', async () => {
-      mockDataClient.get.mockResolvedValueOnce({
-        data: {
-          id: 'market-123',
-          question: 'Will this happen?',
-          conditionId: 'condition-123',
-          slug: 'will-this-happen',
-          resolutionSource: 'polymarket',
-          endDate: '2025-01-01T00:00:00Z',
-          outcomePrices: ['0.50', '0.50'],
-          outcomes: ['Yes', 'No'],
           volume: '100000',
-          volume24hr: '10000',
-          liquidity: '50000',
-          clobTokenIds: ['token1', 'token2'],
+          volume24hr: '5000',
+          clobTokenIds: ['token-1'],
+          outcomes: ['Yes', 'No'],
+          outcomePrices: ['0.65', '0.35'],
+          minimum_order_size: 1,
+          minimum_tick_size: 0.01,
+          description: 'Test description',
+          tags: ['crypto'],
           active: true,
+          closed: false,
+          archived: false,
           accepting_orders: true,
           resolved: false,
         },
+      ];
+
+      mockDataClient.get.mockResolvedValue({ data: mockMarkets });
+
+      const markets = await platform.getMarkets();
+
+      expect(markets).toHaveLength(1);
+      expect(markets[0].id).toBe('market-1');
+      expect(markets[0].platform).toBe('polymarket');
+      expect(markets[0].title).toBe('Will Bitcoin reach $100k?');
+      expect(markets[0].url).toBe('https://polymarket.com/event/bitcoin-100k');
+      expect(markets[0].contracts).toHaveLength(1);
+      expect(markets[0].contracts[0].yesPrice).toBe(0.65);
+      expect(markets[0].contracts[0].noPrice).toBe(0.35);
+    });
+
+    it('should filter out resolved markets', async () => {
+      const mockMarkets = [
+        {
+          id: 'market-1',
+          question: 'Active Market',
+          slug: 'active',
+          endDate: '2025-12-31T00:00:00Z',
+          liquidity: '50000',
+          volume: '100000',
+          outcomes: ['Yes', 'No'],
+          outcomePrices: ['0.65', '0.35'],
+          tags: ['test'],
+          resolved: false,
+        },
+        {
+          id: 'market-2',
+          question: 'Resolved Market',
+          slug: 'resolved',
+          endDate: '2024-01-01T00:00:00Z',
+          liquidity: '0',
+          volume: '200000',
+          outcomes: ['Yes', 'No'],
+          outcomePrices: ['1', '0'],
+          tags: ['test'],
+          resolved: true,
+        },
+      ];
+
+      mockDataClient.get.mockResolvedValue({ data: mockMarkets });
+
+      const markets = await platform.getMarkets();
+
+      expect(markets).toHaveLength(1);
+      expect(markets[0].id).toBe('market-1');
+    });
+
+    it('should call the data API with correct parameters', async () => {
+      mockDataClient.get.mockResolvedValue({ data: [] });
+
+      await platform.getMarkets();
+
+      expect(mockDataClient.get).toHaveBeenCalledWith('/markets', {
+        params: {
+          active: true,
+          closed: false,
+          limit: 100,
+          order: 'volume24hr',
+          ascending: false,
+        },
       });
-
-      const resolution = await platform.getMarketResolution('market-123');
-
-      expect(resolution).toBeNull();
     });
   });
 
@@ -458,34 +208,31 @@ describe('PolymarketPlatform', () => {
       await platform.initialize(config);
     });
 
-    it('should return true when API is accessible', async () => {
-      mockDataClient.get.mockResolvedValueOnce({
+    it('should return true when API responds with valid data', async () => {
+      mockDataClient.get.mockResolvedValue({
         status: 200,
         data: [],
       });
 
       const healthy = await platform.isHealthy();
-
       expect(healthy).toBe(true);
     });
 
-    it('should return false when API is not accessible', async () => {
-      mockDataClient.get.mockRejectedValueOnce(new Error('Network error'));
+    it('should return false when API fails', async () => {
+      mockDataClient.get.mockRejectedValue(new Error('Network error'));
 
       const healthy = await platform.isHealthy();
-
       expect(healthy).toBe(false);
     });
   });
 
   describe('PolymarketPlatformPlugin', () => {
-    it('should create a new instance', () => {
+    it('should create a PolymarketPlatform instance', () => {
       const config: BettingPlatformConfig = {
         name: 'polymarket',
       };
 
       const instance = PolymarketPlatformPlugin.create(config);
-
       expect(instance).toBeInstanceOf(PolymarketPlatform);
     });
   });

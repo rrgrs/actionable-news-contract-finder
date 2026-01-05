@@ -1,5 +1,5 @@
 import { NewsStatus, NewsArticle, NewsMarketMatch, Market } from '@prisma/client';
-import { LLMProvider, Contract } from '../types';
+import { LLMProvider, ContractWithContext } from '../types';
 import { ContractValidatorService } from '../services/analysis/ContractValidatorService';
 import { NewsParserService } from '../services/analysis/NewsParserService';
 import { AlertService, AlertPayload } from '../services/alerts/AlertService';
@@ -175,27 +175,26 @@ export class ValidationWorker extends BaseWorker {
     );
 
     // Build contracts list for validation
-    const contractsToValidate: Contract[] = [];
+    const contractsToValidate: ContractWithContext[] = [];
     const contractToMatchMap = new Map<string, MatchWithMarket>();
 
     for (const match of matches) {
       // For each market, pick the most relevant contract (usually just one)
       const contract = match.market.contracts[0];
       if (contract) {
-        const contractData: Contract = {
-          id: contract.contractTicker,
-          platform: match.market.platform,
-          title: `${match.market.title} - ${contract.title}`,
-          yesPrice: contract.yesPrice,
-          noPrice: contract.noPrice,
-          volume: 0,
-          liquidity: 0,
-          endDate: match.market.endDate || new Date(),
-          tags: match.market.category ? [match.market.category] : [],
-          url: match.market.url,
-          metadata: { similarity: match.similarity },
-        };
-        contractsToValidate.push(contractData);
+        contractsToValidate.push({
+          contract: {
+            id: contract.contractTicker,
+            title: contract.title,
+            yesPrice: contract.yesPrice,
+            noPrice: contract.noPrice,
+            volume: 0,
+            liquidity: 0,
+            endDate: match.market.endDate || undefined,
+          },
+          marketTitle: match.market.title,
+          similarity: match.similarity,
+        });
         contractToMatchMap.set(contract.contractTicker, match);
       }
     }

@@ -4,7 +4,12 @@ export interface ServiceConfig {
   config: Record<string, unknown>;
 }
 
-export type AlertType = 'none' | 'email' | 'system' | 'both';
+export type AlertType = 'none' | 'email' | 'system' | 'slack' | 'both' | 'all';
+
+export interface SlackConfig {
+  botToken: string;
+  channelId: string;
+}
 
 export interface AlertConfig {
   type: AlertType;
@@ -16,6 +21,7 @@ export interface AlertConfig {
     smtpUser?: string;
     smtpPass?: string;
   };
+  slackConfig?: SlackConfig;
   minConfidenceThreshold?: number; // Only alert if confidence is above this
   cooldownMinutes?: number; // Avoid alerting too frequently for the same market
 }

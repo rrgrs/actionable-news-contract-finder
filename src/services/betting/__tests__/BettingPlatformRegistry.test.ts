@@ -10,23 +10,11 @@ describe('BettingPlatformRegistry', () => {
     BettingPlatformRegistry['plugins'].clear();
     BettingPlatformRegistry['instances'].clear();
 
-    // Create mock platform
+    // Create mock platform with new simplified interface
     mockPlatform = {
       name: 'test-platform',
       initialize: jest.fn().mockResolvedValue(undefined),
-      getAvailableContracts: jest.fn().mockResolvedValue([]),
-      getContract: jest.fn().mockResolvedValue(null),
-      placeOrder: jest.fn().mockResolvedValue({
-        orderId: 'test-order-1',
-        status: 'filled' as const,
-        filledQuantity: 10,
-        averagePrice: 0.5,
-        timestamp: new Date(),
-      }),
-      cancelOrder: jest.fn().mockResolvedValue(true),
-      getPositions: jest.fn().mockResolvedValue([]),
-      getBalance: jest.fn().mockResolvedValue(10000),
-      getMarketResolution: jest.fn().mockResolvedValue(null),
+      getMarkets: jest.fn().mockResolvedValue([]),
       isHealthy: jest.fn().mockResolvedValue(true),
       destroy: jest.fn().mockResolvedValue(undefined),
     };

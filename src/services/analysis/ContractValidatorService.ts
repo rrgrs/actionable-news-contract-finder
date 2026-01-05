@@ -1,6 +1,7 @@
 import {
   ContractValidator,
   ContractValidation,
+  ContractWithContext,
   Contract,
   ParsedNewsInsight,
   LLMProvider,
@@ -36,16 +37,17 @@ export class ContractValidatorService implements ContractValidator {
     contract: Contract,
     newsInsight: ParsedNewsInsight,
     llmProvider: LLMProvider,
+    marketTitle?: string,
+    similarity?: number,
   ): Promise<ContractValidation> {
     const systemPrompt = `You are a prediction market analyst. Analyze betting contracts against news events.
 You must respond with valid JSON matching the exact structure provided. Be precise about relevance and risk assessment.`;
 
-    const marketTitle = (contract.metadata?.marketTitle as string) || contract.title;
-    const similarity = contract.metadata?.similarity as number | undefined;
+    const displayTitle = marketTitle || contract.title;
 
     const prompt = `Analyze if this betting contract is relevant to the news and worth betting on.
 
-MARKET QUESTION: ${marketTitle}
+MARKET QUESTION: ${displayTitle}
 ${similarity ? `(Semantic similarity to news: ${(similarity * 100).toFixed(1)}%)` : ''}
 
 CONTRACT OPTION:
@@ -109,25 +111,30 @@ Return ONLY valid JSON, no additional text.`;
   }
 
   async batchValidateContracts(
-    contracts: Contract[],
+    contractsWithContext: ContractWithContext[],
     newsInsight: ParsedNewsInsight,
     llmProvider: LLMProvider,
   ): Promise<ContractValidation[]> {
-    if (contracts.length === 0) {
+    if (contractsWithContext.length === 0) {
       return [];
     }
 
     // For small batches, process in a single LLM call
-    if (contracts.length <= 10) {
-      return this.validateContractsInSingleRequest(contracts, newsInsight, llmProvider);
+    if (contractsWithContext.length <= 10) {
+      const results = await this.validateContractsInSingleRequest(
+        contractsWithContext,
+        newsInsight,
+        llmProvider,
+      );
+      return results.sort((a, b) => b.relevanceScore - a.relevanceScore);
     }
 
     // For larger batches, chunk into groups of 10
     const results: ContractValidation[] = [];
     const batchSize = 10;
 
-    for (let i = 0; i < contracts.length; i += batchSize) {
-      const batch = contracts.slice(i, i + batchSize);
+    for (let i = 0; i < contractsWithContext.length; i += batchSize) {
+      const batch = contractsWithContext.slice(i, i + batchSize);
       try {
         const batchResults = await this.validateContractsInSingleRequest(
           batch,
@@ -138,8 +145,14 @@ Return ONLY valid JSON, no additional text.`;
       } catch (error) {
         console.error(`Batch validation failed, falling back to individual:`, error);
         // Fallback to individual validation
-        for (const contract of batch) {
-          const validation = await this.validateContract(contract, newsInsight, llmProvider);
+        for (const item of batch) {
+          const validation = await this.validateContract(
+            item.contract,
+            newsInsight,
+            llmProvider,
+            item.marketTitle,
+            item.similarity,
+          );
           results.push(validation);
         }
       }
@@ -149,27 +162,26 @@ Return ONLY valid JSON, no additional text.`;
   }
 
   private async validateContractsInSingleRequest(
-    contracts: Contract[],
+    contractsWithContext: ContractWithContext[],
     newsInsight: ParsedNewsInsight,
     llmProvider: LLMProvider,
   ): Promise<ContractValidation[]> {
     const systemPrompt = `You are a prediction market analyst. Analyze multiple betting contracts against a single news event.
 You must respond with a JSON array where each element matches the exact structure provided.`;
 
-    const contractsList = contracts
-      .map((c, i) => {
-        const marketTitle = (c.metadata?.marketTitle as string) || c.title;
-        const similarity = c.metadata?.similarity as number | undefined;
+    const contractsList = contractsWithContext
+      .map((item, i) => {
+        const c = item.contract;
         return `[CONTRACT ${i + 1}]
 ID: ${c.id}
-Market: ${marketTitle}${similarity ? ` (${(similarity * 100).toFixed(0)}% similar)` : ''}
+Market: ${item.marketTitle}${item.similarity ? ` (${(item.similarity * 100).toFixed(0)}% similar)` : ''}
 Option: ${c.title}
 Yes: ${(c.yesPrice * 100).toFixed(0)}% / No: ${(c.noPrice * 100).toFixed(0)}%
 Expires: ${c.endDate ? new Date(c.endDate).toISOString().split('T')[0] : 'Unknown'}`;
       })
       .join('\n\n');
 
-    const prompt = `Analyze these ${contracts.length} betting contracts against the news insight.
+    const prompt = `Analyze these ${contractsWithContext.length} betting contracts against the news insight.
 
 NEWS INSIGHT:
 Summary: ${newsInsight.summary}
@@ -181,7 +193,7 @@ Sentiment: ${newsInsight.sentiment.overall > 0 ? 'Positive' : newsInsight.sentim
 CONTRACTS TO ANALYZE:
 ${contractsList}
 
-Return a JSON array with ${contracts.length} objects, one per contract, in order:
+Return a JSON array with ${contractsWithContext.length} objects, one per contract, in order:
 [
   {
     "contractId": "the contract ID",
@@ -208,22 +220,24 @@ Return ONLY the JSON array, no additional text.`;
       const analysis = await llmProvider.generateCompletion(prompt, systemPrompt);
       const parsedArray = this.parseBatchJSONResponse(analysis);
 
+      // Build a lookup map by contractId since LLM may return results in different order
+      const parsedByContractId = new Map<string, BatchValidationResponse>();
+      for (const parsed of parsedArray) {
+        if (parsed.contractId) {
+          parsedByContractId.set(parsed.contractId, parsed);
+        }
+      }
+
       // Map parsed results to ContractValidation objects
       const validations: ContractValidation[] = [];
 
-      for (let i = 0; i < contracts.length; i++) {
-        const contract = contracts[i];
-        const parsed = parsedArray[i] || this.createEmptyResponse(contract.id);
-
-        // Verify contract ID matches (or use position if IDs don't match)
-        if (parsed.contractId && parsed.contractId !== contract.id) {
-          console.warn(
-            `Contract ID mismatch at position ${i}: expected ${contract.id}, got ${parsed.contractId}`,
-          );
-        }
+      for (const item of contractsWithContext) {
+        const contractId = item.contract.id;
+        // Look up by contractId, fall back to empty response if not found
+        const parsed = parsedByContractId.get(contractId) || this.createEmptyResponse(contractId);
 
         validations.push({
-          contractId: contract.id,
+          contractId,
           newsInsightId: newsInsight.originalNewsId,
           isRelevant: parsed.isRelevant ?? false,
           relevanceScore: this.clamp(parsed.relevanceScore ?? 0, 0, 1),

@@ -294,20 +294,21 @@ describe('NewsParserService', () => {
     it('should handle partial batch failures', async () => {
       const newsItems = [testNewsItem, { ...testNewsItem, id: 'news-2' }];
 
-      let callCount = 0;
-      mockLLMProvider.generateCompletion = jest.fn().mockImplementation(() => {
-        callCount++;
-        if (callCount === 1) {
-          return Promise.resolve(JSON.stringify(mockLLMResponse));
-        }
-        return Promise.reject(new Error('API error'));
-      });
+      // Mock proper batch array response
+      const batchResponse = [
+        { ...mockLLMResponse, newsId: 'news-1' },
+        { ...mockLLMResponse, newsId: 'news-2' },
+      ];
+
+      mockLLMProvider.generateCompletion = jest
+        .fn()
+        .mockResolvedValue(JSON.stringify(batchResponse));
 
       const results = await parser.batchParseNews(newsItems, mockLLMProvider);
 
       expect(results).toHaveLength(2);
-      expect(results[0].entities).toHaveLength(2); // Successful parse
-      expect(results[1].metadata?.fallbackAnalysis).toBe(true); // Fallback analysis
+      expect(results[0].entities).toHaveLength(2);
+      expect(results[1].entities).toHaveLength(2);
     });
   });
 

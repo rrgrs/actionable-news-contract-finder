@@ -82,7 +82,7 @@ export class ConfigLoader {
     const alertType = (process.env.ALERT_TYPE || 'none').toLowerCase() as AlertType;
 
     // Validate alert type
-    if (!['none', 'email', 'system', 'both'].includes(alertType)) {
+    if (!['none', 'email', 'system', 'slack', 'all'].includes(alertType)) {
       console.warn(`Invalid ALERT_TYPE '${alertType}', using 'none'`);
       return { type: 'none' };
     }
@@ -98,7 +98,7 @@ export class ConfigLoader {
     };
 
     // Parse email configuration if needed
-    if (alertType === 'email' || alertType === 'both') {
+    if (alertType === 'email' || alertType === 'all') {
       const emailTo = process.env.ALERT_EMAIL_TO;
       if (!emailTo) {
         console.warn('Email alerts configured but ALERT_EMAIL_TO not set');
@@ -112,6 +112,26 @@ export class ConfigLoader {
         smtpUser: process.env.ALERT_SMTP_USER,
         smtpPass: process.env.ALERT_SMTP_PASS,
       };
+    }
+
+    // Parse Slack configuration if needed
+    if (alertType === 'slack' || alertType === 'all') {
+      const botToken = process.env.SLACK_BOT_TOKEN;
+      const channelId = process.env.SLACK_CHANNEL_ID;
+
+      if (!botToken) {
+        console.warn('Slack alerts configured but SLACK_BOT_TOKEN not set');
+      }
+      if (!channelId) {
+        console.warn('Slack alerts configured but SLACK_CHANNEL_ID not set');
+      }
+
+      if (botToken && channelId) {
+        config.slackConfig = {
+          botToken,
+          channelId,
+        };
+      }
     }
 
     return config;

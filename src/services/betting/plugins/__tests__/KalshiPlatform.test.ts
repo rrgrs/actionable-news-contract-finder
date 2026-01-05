@@ -1,7 +1,7 @@
 import { KalshiPlatform, KalshiPlatformPlugin } from '../KalshiPlatform';
 import axios from 'axios';
 import * as jwt from 'jsonwebtoken';
-import { BettingPlatformConfig, Order } from '../../../../types';
+import { BettingPlatformConfig } from '../../../../types';
 
 jest.mock('axios');
 jest.mock('jsonwebtoken');
@@ -22,12 +22,16 @@ describe('KalshiPlatform', () => {
         common: Record<string, string>;
       };
     };
+    interceptors: {
+      request: {
+        use: jest.Mock;
+      };
+    };
   };
 
   beforeEach(() => {
     platform = new KalshiPlatform();
 
-    // Mock axios instance
     mockAxiosInstance = {
       post: jest.fn(),
       get: jest.fn(),
@@ -42,11 +46,9 @@ describe('KalshiPlatform', () => {
           use: jest.fn(),
         },
       },
-    } as unknown as typeof mockAxiosInstance;
+    };
 
     mockedAxios.create = jest.fn().mockReturnValue(mockAxiosInstance);
-
-    // Mock jwt.sign to return a fake token
     (jwt.sign as jest.Mock).mockReturnValue('fake-jwt-token');
   });
 
@@ -66,14 +68,12 @@ describe('KalshiPlatform', () => {
 
       await platform.initialize(config);
 
-      // fs.readFileSync is mocked to return 'fake-private-key'
-      // Default is live mode
       expect(mockedAxios.create).toHaveBeenCalledWith({
         baseURL: 'https://api.elections.kalshi.com/trade-api/v2',
         headers: {
           'Content-Type': 'application/json',
         },
-        timeout: 15000,
+        timeout: 60000,
       });
     });
 
@@ -94,7 +94,7 @@ describe('KalshiPlatform', () => {
         headers: {
           'Content-Type': 'application/json',
         },
-        timeout: 15000,
+        timeout: 60000,
       });
     });
 
@@ -107,10 +107,8 @@ describe('KalshiPlatform', () => {
         'Kalshi API credentials not provided',
       );
     });
-  });
 
-  describe('getAvailableContracts', () => {
-    beforeEach(async () => {
+    it('should add request interceptor for JWT signing', async () => {
       const config: BettingPlatformConfig = {
         name: 'kalshi',
         customConfig: {
@@ -120,263 +118,190 @@ describe('KalshiPlatform', () => {
       };
 
       await platform.initialize(config);
-    });
 
-    it('should fetch and convert available contracts', async () => {
-      // Mock the events endpoint (for fetchAllEventTitles)
-      const mockEventsResponse = {
-        data: {
-          events: [
-            {
-              event_ticker: 'FEDRATE',
-              title: 'Federal Reserve Rate Decision',
-            },
-          ],
-          cursor: null,
-        },
-      };
-
-      // Mock the markets endpoint
-      const mockMarketsResponse = {
-        data: {
-          markets: [
-            {
-              ticker: 'FEDRATE-24-HIKE',
-              event_ticker: 'FEDRATE',
-              title: 'Fed raises rates in December 2024',
-              subtitle: 'Will the Fed raise rates?',
-              yes_sub_title: 'Yes',
-              no_sub_title: 'No',
-              status: 'open',
-              yes_ask: 35, // 35 cents = $0.35
-              no_ask: 65, // 65 cents = $0.65
-              yes_bid: 30,
-              no_bid: 70,
-              last_price: 32,
-              volume: 50000,
-              volume_24h: 10000,
-              liquidity: 100000,
-              open_interest: 5000,
-              open_time: '2024-01-01T00:00:00Z',
-              close_time: '2024-12-31T23:59:59Z',
-              expiration_time: '2025-01-01T00:00:00Z',
-              market_type: 'binary',
-            },
-          ],
-          cursor: null,
-        },
-      };
-
-      // First call is for events, second is for markets
-      mockAxiosInstance.get
-        .mockResolvedValueOnce(mockEventsResponse)
-        .mockResolvedValueOnce(mockMarketsResponse);
-
-      const contracts = await platform.getAvailableContracts();
-
-      expect(contracts).toHaveLength(1);
-      expect(contracts[0]).toMatchObject({
-        id: 'FEDRATE-24-HIKE',
-        platform: 'kalshi',
-        title: 'Yes',
-        yesPrice: 0.35,
-        noPrice: 0.65,
-        volume: 50000,
-        liquidity: 100000,
-      });
+      expect(mockAxiosInstance.interceptors.request.use).toHaveBeenCalled();
     });
   });
 
-  describe('placeOrder', () => {
-    beforeEach(async () => {
-      const config: BettingPlatformConfig = {
-        name: 'kalshi',
-        customConfig: {
-          apiKeyId: 'test-api-key-id',
-          privateKeyPath: '/path/to/private-key.pem',
-        },
-      };
+  describe('getMarkets', () => {
+    const config: BettingPlatformConfig = {
+      name: 'kalshi',
+      customConfig: {
+        apiKeyId: 'test-api-key-id',
+        privateKeyPath: '/path/to/private-key.pem',
+      },
+    };
 
+    beforeEach(async () => {
       await platform.initialize(config);
     });
 
-    it('should place a market order', async () => {
-      const order: Order = {
-        contractId: 'FEDRATE-24-HIKE',
-        platform: 'kalshi',
-        side: 'yes',
-        quantity: 10,
-        orderType: 'market',
-      };
-
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          order: {
-            order_id: 'order-123',
-            status: 'executed',
-            count: 10,
-            yes_price: 3500,
-            created_time: '2024-01-01T00:00:00Z',
-          },
+    it('should fetch events and markets separately and combine them', async () => {
+      const mockEvents = [
+        {
+          event_ticker: 'KXTEST',
+          series_ticker: 'KXSERIES',
+          title: 'Test Event',
+          sub_title: 'Test subtitle',
+          category: 'Technology',
+          mutually_exclusive: true,
         },
+      ];
+
+      const mockMarkets = [
+        {
+          ticker: 'KXTEST-YES',
+          event_ticker: 'KXTEST',
+          title: 'Test Market',
+          yes_sub_title: 'Yes',
+          no_sub_title: 'No',
+          status: 'active',
+          open_time: '2024-01-01T00:00:00Z',
+          expiration_time: '2025-12-31T00:00:00Z',
+          yes_ask: 65,
+          no_ask: 35,
+          volume: 10000,
+          liquidity: 5000,
+        },
+      ];
+
+      // Both endpoints called in parallel
+      mockAxiosInstance.get.mockImplementation((url: string) => {
+        if (url === '/events') {
+          return Promise.resolve({ data: { events: mockEvents, cursor: null } });
+        }
+        if (url === '/markets') {
+          return Promise.resolve({ data: { markets: mockMarkets, cursor: null } });
+        }
+        return Promise.reject(new Error('Unknown endpoint'));
       });
 
-      const result = await platform.placeOrder(order);
+      const markets = await platform.getMarkets();
 
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/portfolio/orders', {
-        ticker: 'FEDRATE-24-HIKE',
-        client_order_id: expect.stringContaining('ancf_'),
-        side: 'yes',
-        action: 'buy',
-        count: 10,
-        type: 'market',
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/events', {
+        params: { status: 'open', limit: 200, cursor: undefined },
+      });
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/markets', {
+        params: { status: 'open', limit: 200, cursor: undefined },
       });
 
-      expect(result).toMatchObject({
-        orderId: 'order-123',
-        status: 'filled',
-        filledQuantity: 10,
-        averagePrice: 35,
-      });
+      expect(markets).toHaveLength(1);
+      expect(markets[0].id).toBe('KXTEST');
+      expect(markets[0].platform).toBe('kalshi');
+      expect(markets[0].title).toBe('Test Event');
+      expect(markets[0].contracts).toHaveLength(1);
+      expect(markets[0].contracts[0].id).toBe('KXTEST-YES');
+      expect(markets[0].contracts[0].yesPrice).toBe(0.65);
     });
 
-    it('should place a limit order', async () => {
-      const order: Order = {
-        contractId: 'FEDRATE-24-HIKE',
-        platform: 'kalshi',
-        side: 'no',
-        quantity: 5,
-        orderType: 'limit',
-        limitPrice: 0.7,
-      };
-
-      mockAxiosInstance.post.mockResolvedValueOnce({
-        data: {
-          order: {
-            order_id: 'order-456',
-            status: 'resting',
-            count: 5,
-            no_price: 7000,
-            created_time: '2024-01-01T00:00:00Z',
-          },
+    it('should skip markets without matching events', async () => {
+      const mockEvents = [
+        {
+          event_ticker: 'KXOTHER',
+          title: 'Other Event',
         },
+      ];
+
+      const mockMarkets = [
+        {
+          ticker: 'KXTEST-YES',
+          event_ticker: 'KXTEST', // No matching event
+          title: 'Test Market',
+          status: 'active',
+          open_time: '2024-01-01T00:00:00Z',
+          expiration_time: '2025-12-31T00:00:00Z',
+          yes_ask: 50,
+          no_ask: 50,
+        },
+      ];
+
+      mockAxiosInstance.get.mockImplementation((url: string) => {
+        if (url === '/events') {
+          return Promise.resolve({ data: { events: mockEvents, cursor: null } });
+        }
+        if (url === '/markets') {
+          return Promise.resolve({ data: { markets: mockMarkets, cursor: null } });
+        }
+        return Promise.reject(new Error('Unknown endpoint'));
       });
 
-      const result = await platform.placeOrder(order);
+      const markets = await platform.getMarkets();
 
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/portfolio/orders', {
-        ticker: 'FEDRATE-24-HIKE',
-        client_order_id: expect.stringContaining('ancf_'),
-        side: 'no',
-        action: 'buy',
-        count: 5,
-        type: 'limit',
-        no_price: 70,
-      });
-
-      expect(result.status).toBe('pending');
-    });
-  });
-
-  describe('getPositions', () => {
-    beforeEach(async () => {
-      const config: BettingPlatformConfig = {
-        name: 'kalshi',
-        customConfig: {
-          apiKeyId: 'test-api-key-id',
-          privateKeyPath: '/path/to/private-key.pem',
-        },
-      };
-
-      await platform.initialize(config);
+      expect(markets).toHaveLength(0);
     });
 
-    it('should fetch and convert positions', async () => {
-      mockAxiosInstance.get
-        .mockResolvedValueOnce({
-          data: {
-            market_positions: [
-              {
-                ticker: 'FEDRATE-24-HIKE',
-                position: 100,
-                market_exposure: 3500,
-                realized_pnl: 500,
-                total_traded: 35000,
-                fees_paid: 50,
+    it('should handle pagination for both endpoints', async () => {
+      let eventsCallCount = 0;
+      let marketsCallCount = 0;
+
+      mockAxiosInstance.get.mockImplementation((url: string) => {
+        if (url === '/events') {
+          eventsCallCount++;
+          if (eventsCallCount === 1) {
+            return Promise.resolve({
+              data: {
+                events: [{ event_ticker: 'KX1', title: 'Event 1' }],
+                cursor: 'events-next',
               },
-            ],
-          },
-        })
-        .mockResolvedValueOnce({
-          data: {
-            market: {
-              ticker: 'FEDRATE-24-HIKE',
-              event_ticker: 'FEDRATE',
-              yes_ask: 40, // 40 cents = $0.40
-              no_ask: 60, // 60 cents = $0.60
-              status: 'open',
-              title: 'Fed Rate Hike',
-              subtitle: 'Will rates increase?',
-              close_time: '2024-12-31T23:59:59Z',
-              expiration_time: '2025-01-01T00:00:00Z',
+            });
+          }
+          return Promise.resolve({
+            data: {
+              events: [{ event_ticker: 'KX2', title: 'Event 2' }],
+              cursor: null,
             },
-          },
-        })
-        .mockResolvedValueOnce({
-          data: {
-            events: [
-              {
-                event_ticker: 'FEDRATE',
-                title: 'Federal Reserve Decision',
+          });
+        }
+        if (url === '/markets') {
+          marketsCallCount++;
+          if (marketsCallCount === 1) {
+            return Promise.resolve({
+              data: {
+                markets: [
+                  {
+                    ticker: 'KX1-YES',
+                    event_ticker: 'KX1',
+                    status: 'active',
+                    open_time: '2024-01-01T00:00:00Z',
+                    expiration_time: '2025-12-31T00:00:00Z',
+                    yes_ask: 50,
+                    no_ask: 50,
+                  },
+                ],
+                cursor: 'markets-next',
               },
-            ],
-          },
-        });
-
-      const positions = await platform.getPositions();
-
-      expect(positions).toHaveLength(1);
-      expect(positions[0]).toMatchObject({
-        contractId: 'FEDRATE-24-HIKE',
-        platform: 'kalshi',
-        quantity: 100,
-        side: 'yes',
-        averagePrice: 3.5,
-        currentPrice: 0.4,
-        realizedPnl: 5,
-      });
-    });
-  });
-
-  describe('getBalance', () => {
-    beforeEach(async () => {
-      const config: BettingPlatformConfig = {
-        name: 'kalshi',
-        customConfig: {
-          apiKeyId: 'test-api-key-id',
-          privateKeyPath: '/path/to/private-key.pem',
-        },
-      };
-
-      await platform.initialize(config);
-    });
-
-    it('should fetch account balance', async () => {
-      mockAxiosInstance.get.mockResolvedValueOnce({
-        data: {
-          balance: 10000, // $100 in cents
-        },
+            });
+          }
+          return Promise.resolve({
+            data: {
+              markets: [
+                {
+                  ticker: 'KX2-YES',
+                  event_ticker: 'KX2',
+                  status: 'active',
+                  open_time: '2024-01-01T00:00:00Z',
+                  expiration_time: '2025-12-31T00:00:00Z',
+                  yes_ask: 60,
+                  no_ask: 40,
+                },
+              ],
+              cursor: null,
+            },
+          });
+        }
+        return Promise.reject(new Error('Unknown endpoint'));
       });
 
-      const balance = await platform.getBalance();
+      const markets = await platform.getMarkets();
 
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/portfolio/balance');
-      expect(balance).toBe(100);
+      expect(eventsCallCount).toBe(2);
+      expect(marketsCallCount).toBe(2);
+      expect(markets).toHaveLength(2);
     });
   });
 
   describe('isHealthy', () => {
-    beforeEach(async () => {
+    it('should return true when exchange is active', async () => {
       const config: BettingPlatformConfig = {
         name: 'kalshi',
         customConfig: {
@@ -386,41 +311,59 @@ describe('KalshiPlatform', () => {
       };
 
       await platform.initialize(config);
-    });
 
-    it('should return true when exchange is active', async () => {
-      mockAxiosInstance.get.mockResolvedValueOnce({
-        data: {
-          trading_active: true,
-        },
+      mockAxiosInstance.get.mockResolvedValue({
+        data: { trading_active: true },
       });
 
       const healthy = await platform.isHealthy();
-
       expect(healthy).toBe(true);
     });
 
-    it('should return false when exchange is inactive', async () => {
-      mockAxiosInstance.get.mockResolvedValueOnce({
-        data: {
-          trading_active: false,
+    it('should return false when exchange is not active', async () => {
+      const config: BettingPlatformConfig = {
+        name: 'kalshi',
+        customConfig: {
+          apiKeyId: 'test-api-key-id',
+          privateKeyPath: '/path/to/private-key.pem',
         },
+      };
+
+      await platform.initialize(config);
+
+      mockAxiosInstance.get.mockResolvedValue({
+        data: { trading_active: false },
       });
 
       const healthy = await platform.isHealthy();
+      expect(healthy).toBe(false);
+    });
 
+    it('should return false on error', async () => {
+      const config: BettingPlatformConfig = {
+        name: 'kalshi',
+        customConfig: {
+          apiKeyId: 'test-api-key-id',
+          privateKeyPath: '/path/to/private-key.pem',
+        },
+      };
+
+      await platform.initialize(config);
+
+      mockAxiosInstance.get.mockRejectedValue(new Error('Network error'));
+
+      const healthy = await platform.isHealthy();
       expect(healthy).toBe(false);
     });
   });
 
   describe('KalshiPlatformPlugin', () => {
-    it('should create a new instance', () => {
+    it('should create a KalshiPlatform instance', () => {
       const config: BettingPlatformConfig = {
         name: 'kalshi',
       };
 
       const instance = KalshiPlatformPlugin.create(config);
-
       expect(instance).toBeInstanceOf(KalshiPlatform);
     });
   });

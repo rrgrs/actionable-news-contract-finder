@@ -1,14 +1,8 @@
 import { PrismaClient, Market as PrismaMarket } from '@prisma/client';
-import { BettingPlatform, Contract } from '../types';
+import { BettingPlatform, MarketWithContracts, Contract } from '../types';
 import { EmbeddingService } from '../services/embedding/EmbeddingService';
 import { BaseRunner, RunnerConfig } from './BaseRunner';
-import {
-  getTextForEmbedding,
-  serializeMetadata,
-  extractSeriesTicker,
-  groupContractsByEvent,
-  deriveMarketTitle,
-} from '../lib/marketHelpers';
+import { getTextForEmbedding } from '../lib/marketHelpers';
 
 export interface PlatformSyncRunnerConfig extends RunnerConfig {
   /** The betting platform to sync */
@@ -79,42 +73,37 @@ export class PlatformSyncRunner extends BaseRunner {
       embeddingsGenerated: 0,
     };
 
-    // Fetch all contracts from the platform
-    const contracts = await this.platform.getAvailableContracts();
-    this.logger.debug('Fetched contracts', { count: contracts.length });
-
-    // Group contracts by event ticker
-    const contractGroups = groupContractsByEvent(contracts);
-    this.logger.debug('Grouped contracts into markets', {
-      marketCount: contractGroups.size,
-    });
+    // Fetch all markets with their contracts from the platform
+    const markets = await this.platform.getMarkets();
+    this.logger.debug('Fetched markets', { count: markets.length });
 
     // Track which markets and contracts we've seen
-    const seenMarketTickers = new Set<string>();
-    const seenContractTickers = new Set<string>();
+    const seenMarketIds = new Set<string>();
+    const seenContractIds = new Set<string>();
     const marketsNeedingEmbeddings: PrismaMarket[] = [];
 
-    // Process each market group
-    for (const [eventTicker, groupContracts] of contractGroups) {
-      seenMarketTickers.add(eventTicker);
+    // Process each market
+    for (const market of markets) {
+      seenMarketIds.add(market.id);
 
-      const marketResult = await this.syncMarket(eventTicker, groupContracts);
+      const marketResult = await this.syncMarket(market);
 
       if (marketResult.created) {
         stats.marketsAdded++;
-        marketsNeedingEmbeddings.push(marketResult.market);
       } else if (marketResult.updated) {
         stats.marketsUpdated++;
-        if (marketResult.titleChanged) {
-          marketsNeedingEmbeddings.push(marketResult.market);
-        }
+      }
+
+      // Queue embedding generation for markets that need it
+      if (marketResult.needsEmbedding) {
+        marketsNeedingEmbeddings.push(marketResult.dbMarket);
       }
 
       // Sync contracts for this market
-      for (const contract of groupContracts) {
-        seenContractTickers.add(contract.id);
+      for (const contract of market.contracts) {
+        seenContractIds.add(contract.id);
 
-        const contractResult = await this.syncContract(marketResult.market.id, contract);
+        const contractResult = await this.syncContract(marketResult.dbMarket.id, contract);
 
         if (contractResult.created) {
           stats.contractsAdded++;
@@ -125,67 +114,75 @@ export class PlatformSyncRunner extends BaseRunner {
     }
 
     // Deactivate markets no longer in the platform
-    stats.marketsDeactivated = await this.deactivateOldMarkets(seenMarketTickers);
+    stats.marketsDeactivated = await this.deactivateOldMarkets(seenMarketIds);
 
     // Deactivate contracts no longer in the platform
-    stats.contractsDeactivated = await this.deactivateOldContracts(seenContractTickers);
+    stats.contractsDeactivated = await this.deactivateOldContracts(seenContractIds);
 
-    // Generate embeddings for new/updated markets
+    // Generate embeddings for new/updated markets (limit per sync to avoid overwhelming)
+    const maxEmbeddingsPerSync = 200;
     if (marketsNeedingEmbeddings.length > 0) {
-      stats.embeddingsGenerated = await this.generateEmbeddings(marketsNeedingEmbeddings);
+      const toEmbed = marketsNeedingEmbeddings.slice(0, maxEmbeddingsPerSync);
+      if (marketsNeedingEmbeddings.length > maxEmbeddingsPerSync) {
+        this.logger.info('Limiting embedding generation', {
+          total: marketsNeedingEmbeddings.length,
+          processing: toEmbed.length,
+          remaining: marketsNeedingEmbeddings.length - maxEmbeddingsPerSync,
+        });
+      }
+      stats.embeddingsGenerated = await this.generateEmbeddings(toEmbed);
     }
 
     return stats;
   }
 
-  private async syncMarket(
-    eventTicker: string,
-    contracts: Contract[],
-  ): Promise<{
-    market: PrismaMarket;
+  /**
+   * Sync a market from the platform to the database.
+   * Market data comes directly from the platform - no deriving needed.
+   */
+  private async syncMarket(market: MarketWithContracts): Promise<{
+    dbMarket: PrismaMarket;
     created: boolean;
     updated: boolean;
-    titleChanged: boolean;
+    needsEmbedding: boolean;
   }> {
-    const firstContract = contracts[0];
-    const metadata = firstContract.metadata || {};
-
-    const seriesTicker = (metadata.seriesTicker as string) || extractSeriesTicker(eventTicker);
-    const title = deriveMarketTitle(contracts);
-    const url = firstContract.url;
-    const category = (metadata.category as string) || (firstContract.tags?.[0] as string);
-    const endDate = firstContract.endDate;
-
     const existingMarket = await this.prisma.market.findUnique({
       where: {
-        platform_eventTicker: { platform: this.platform.name, eventTicker },
+        platform_eventTicker: { platform: market.platform, eventTicker: market.id },
       },
     });
 
     if (existingMarket) {
+      // Check if market has embedding (Prisma doesn't support vector type directly)
+      const embeddingCheck = await this.prisma.$queryRaw<Array<{ has_embedding: boolean }>>`
+        SELECT embedding IS NOT NULL as has_embedding FROM markets WHERE id = ${existingMarket.id}
+      `;
+      const hasEmbedding = embeddingCheck[0]?.has_embedding ?? false;
+
       const needsUpdate =
-        existingMarket.title !== title ||
-        existingMarket.url !== url ||
-        existingMarket.category !== category;
+        existingMarket.title !== market.title ||
+        existingMarket.url !== market.url ||
+        existingMarket.category !== market.category;
 
       if (needsUpdate) {
         const updatedMarket = await this.prisma.market.update({
           where: { id: existingMarket.id },
           data: {
-            title,
-            url,
-            category,
-            endDate,
+            title: market.title,
+            url: market.url,
+            category: market.category,
+            endDate: market.endDate,
+            seriesTicker: market.seriesTicker,
             isActive: true,
             lastSyncedAt: new Date(),
           },
         });
 
         return {
-          market: updatedMarket,
+          dbMarket: updatedMarket,
           created: false,
           updated: true,
-          titleChanged: existingMarket.title !== title,
+          needsEmbedding: !hasEmbedding || existingMarket.title !== market.title,
         };
       }
 
@@ -196,45 +193,45 @@ export class PlatformSyncRunner extends BaseRunner {
       });
 
       return {
-        market: existingMarket,
+        dbMarket: existingMarket,
         created: false,
         updated: false,
-        titleChanged: false,
+        needsEmbedding: !hasEmbedding,
       };
     }
 
     // Create new market
     const newMarket = await this.prisma.market.create({
       data: {
-        platform: this.platform.name,
-        eventTicker,
-        seriesTicker,
-        title,
-        url,
-        category,
-        endDate,
+        platform: market.platform,
+        eventTicker: market.id,
+        seriesTicker: market.seriesTicker,
+        title: market.title,
+        url: market.url,
+        category: market.category,
+        endDate: market.endDate,
         isActive: true,
         lastSyncedAt: new Date(),
       },
     });
 
     return {
-      market: newMarket,
+      dbMarket: newMarket,
       created: true,
       updated: false,
-      titleChanged: false,
+      needsEmbedding: true,
     };
   }
 
+  /**
+   * Sync a contract from the platform to the database.
+   */
   private async syncContract(
     marketId: number,
     contract: Contract,
   ): Promise<{ created: boolean; updated: boolean }> {
-    const contractTicker = contract.id;
-    const metadata = contract.metadata || {};
-
     const existingContract = await this.prisma.contract.findUnique({
-      where: { contractTicker },
+      where: { contractTicker: contract.id },
     });
 
     if (existingContract) {
@@ -254,7 +251,6 @@ export class PlatformSyncRunner extends BaseRunner {
             noPrice: contract.noPrice,
             volume: contract.volume,
             liquidity: contract.liquidity,
-            metadata: serializeMetadata(metadata),
             isActive: true,
             lastSyncedAt: new Date(),
           },
@@ -276,13 +272,12 @@ export class PlatformSyncRunner extends BaseRunner {
     await this.prisma.contract.create({
       data: {
         marketId,
-        contractTicker,
+        contractTicker: contract.id,
         title: contract.title,
         yesPrice: contract.yesPrice,
         noPrice: contract.noPrice,
         volume: contract.volume,
         liquidity: contract.liquidity,
-        metadata: serializeMetadata(metadata),
         isActive: true,
         lastSyncedAt: new Date(),
       },
@@ -291,25 +286,30 @@ export class PlatformSyncRunner extends BaseRunner {
     return { created: true, updated: false };
   }
 
-  private async deactivateOldMarkets(seenTickers: Set<string>): Promise<number> {
+  private async deactivateOldMarkets(seenIds: Set<string>): Promise<number> {
     const allActive = await this.prisma.market.findMany({
       where: { platform: this.platform.name, isActive: true },
       select: { id: true, eventTicker: true },
     });
 
-    const toDeactivate = allActive.filter((m) => !seenTickers.has(m.eventTicker));
+    const toDeactivate = allActive.filter((m) => !seenIds.has(m.eventTicker));
 
     if (toDeactivate.length > 0) {
-      await this.prisma.market.updateMany({
-        where: { id: { in: toDeactivate.map((m) => m.id) } },
-        data: { isActive: false },
-      });
+      // Batch updates to avoid exceeding PostgreSQL's bind variable limit (32767)
+      const batchSize = 10000;
+      for (let i = 0; i < toDeactivate.length; i += batchSize) {
+        const batch = toDeactivate.slice(i, i + batchSize);
+        await this.prisma.market.updateMany({
+          where: { id: { in: batch.map((m) => m.id) } },
+          data: { isActive: false },
+        });
+      }
     }
 
     return toDeactivate.length;
   }
 
-  private async deactivateOldContracts(seenTickers: Set<string>): Promise<number> {
+  private async deactivateOldContracts(seenIds: Set<string>): Promise<number> {
     const allActive = await this.prisma.contract.findMany({
       where: {
         market: { platform: this.platform.name },
@@ -318,13 +318,18 @@ export class PlatformSyncRunner extends BaseRunner {
       select: { id: true, contractTicker: true },
     });
 
-    const toDeactivate = allActive.filter((c) => !seenTickers.has(c.contractTicker));
+    const toDeactivate = allActive.filter((c) => !seenIds.has(c.contractTicker));
 
     if (toDeactivate.length > 0) {
-      await this.prisma.contract.updateMany({
-        where: { id: { in: toDeactivate.map((c) => c.id) } },
-        data: { isActive: false },
-      });
+      // Batch updates to avoid exceeding PostgreSQL's bind variable limit (32767)
+      const batchSize = 10000;
+      for (let i = 0; i < toDeactivate.length; i += batchSize) {
+        const batch = toDeactivate.slice(i, i + batchSize);
+        await this.prisma.contract.updateMany({
+          where: { id: { in: batch.map((c) => c.id) } },
+          data: { isActive: false },
+        });
+      }
     }
 
     return toDeactivate.length;
